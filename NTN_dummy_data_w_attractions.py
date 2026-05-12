@@ -262,13 +262,6 @@ hex_radius = 0.6
 horiz_spacing = np.sqrt(3) * hex_radius
 vert_spacing = 1.5 * hex_radius
 
-# We use the new boundaries we defined in Section 2
-for row in range(int((LAT_MAX - LAT_MIN) / vert_spacing) + 2):
-    for col in range(int((LON_MAX - LON_MIN) / horiz_spacing) + 2):
-        y = LAT_MIN + row * vert_spacing
-        x = LON_MIN + col * horiz_spacing
-        if row % 2 == 1: x += horiz_spacing / 2
-        ax.add_patch(RegularPolygon((x, y), numVertices=6, radius=hex_radius, orientation=0, facecolor='none', edgecolor='magenta', alpha=0.4, linewidth=1.5))
 
 rows = int((LAT_MAX - LAT_MIN) / vert_spacing) + 2
 cols = int((LON_MAX - LON_MIN) / horiz_spacing) + 2
