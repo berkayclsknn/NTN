@@ -64,80 +64,122 @@ def draw_ontario_boundary(ax, geom, edgecolor="black", linewidth=1.0, alpha=0.8,
         ax.plot(x, y, color=edgecolor, linewidth=linewidth, alpha=alpha, zorder=zorder)
 
 
-# ==========================================
-# 1. REAL-WORLD ONTARIO TRAFFIC DATA
-# ==========================================
-
-BIG_CITY_TB = [98, 68, 53, 45, 45, 60, 91, 129, 151, 159, 163, 166,
-               174, 169, 166, 174, 189, 204, 219, 242, 257, 249, 212, 159]
-
-RURAL_TB = [19, 13, 10, 9, 9, 12, 18, 25, 29, 31, 32, 32,
-            34, 33, 32, 34, 36, 39, 42, 47, 50, 48, 41, 31]
-
-AVG_CITY_TB = sum(BIG_CITY_TB) / 24.0
-AVG_RURAL_TB = sum(RURAL_TB) / 24.0
-
 
 # ==========================================
-# 2. DEFINE THE USER CLASS
+# 1. DEFINE THE USER CLASS & BEHAVIOR
 # ==========================================
-
 class User:
     def __init__(self, user_id, lat, lon):
         self.user_id = user_id
-
+        
+        # ==========================================
+        # VISITATION PROBABILITY (Zipf's Law)
+        # ==========================================
+        # Reference: González et al., Nature (2008)
+        num_attractors = 3
+        ranks = np.arange(1, num_attractors + 1)
+        
+        # P(k) ~ 1/k^a (Using alpha=1.2 to match heavy-tailed human behavior)
+        raw_probs = 1.0 / (ranks ** 1.2)
+        
+        # Normalizes the fractions so they equal 1.0 (Output is roughly 60% / 26% / 14%)
+        self.attractor_probs = raw_probs / np.sum(raw_probs)
+        
+        # ==========================================
+        # DISPLACEMENT DISTANCE (Truncated Power-Law)
+        # ==========================================
+        # Reference: González et al., Nature (2008) - Eq 1
+        beta = 1.75
+        delta_r0 = 1.5  # km
+        kappa = 80.0    # km (Using the D2 dataset cutoff)
+        
         self.home_lat = lat
         self.home_lon = lon
+        self.attractors = [(self.home_lat, self.home_lon)]
+        
+        for _ in range(num_attractors - 1):
+            accepted = False
+            r_km = 0.0
+            
+            # Mathematical Rejection Sampling
+            while not accepted:
+                # Generate distance from Power-Law: (r + r0)^-beta
+                r_km = np.random.pareto(beta - 1.0) * delta_r0
+                # Apply Exponential Cutoff: exp(-r / kappa)
+                cutoff_probability = np.exp(-r_km / kappa)
+                
+                if np.random.rand() < cutoff_probability:
+                    accepted = True
+            
+            # Convert km to GPS degrees (1 deg ~ 111 km)
+            r_deg = r_km / 111.0
+            theta = np.random.uniform(0, 2 * np.pi)
+            new_lat = self.home_lat + (r_deg * np.sin(theta))
+            new_lon = self.home_lon + (r_deg * np.cos(theta))
+            
+            self.attractors.append((new_lat, new_lon))
+            
 
-        self.attractors = [
-            (self.home_lat, self.home_lon),
-            (
-                self.home_lat + np.random.normal(0, 0.1),
-                self.home_lon + np.random.normal(0, 0.1)
-            ),
-            (
-                self.home_lat + np.random.normal(0, 0.05),
-                self.home_lon + np.random.normal(0, 0.05)
-            )
-        ]
-
-        self.attractor_probs = [0.7, 0.2, 0.1]
-
+        # Put the user at their Home location at Hour 0
         self.lat = self.home_lat
         self.lon = self.home_lon
-
+        
+        # Memory for plotting their daily path
         self.history_lat = [self.lat]
-        self.history_lon = [self.lon]
-
-        self.base_demand_mbps = np.random.uniform(1.0, 5.0)
-        self.coverage_type = None
-        self.tn_cell_id = None
-
-    def get_demand_at_time(self, hour):
-        """
-        Calculates demand using the Ontario traffic profile.
-        """
-
-        is_city = True if self.coverage_type in ["TN", None] else False
-
-        if is_city:
-            hourly_multiplier = BIG_CITY_TB[hour] / AVG_CITY_TB
+        self.history_lon = [self.lon]        
+        
+        # ==========================================
+        # DIFFERENTIATED USER TRAFFIC PROFILES
+        # ==========================================
+        # Reference: 3GPP TR 38.913 version 14.3.0 Release 14 
+        # 
+        profile_roll = np.random.rand()
+        if profile_roll < 0.20: 
+            self.user_type = "Light (Text/Web)" #mMTC
+            self.base_demand_mbps = np.random.uniform(0.1, 1.0)
+        elif profile_roll < 0.80:
+            self.user_type = "Medium (Social/Video)" #nominal eMBB
+            self.base_demand_mbps = np.random.uniform(1.5, 5.0)
         else:
-            hourly_multiplier = RURAL_TB[hour] / AVG_RURAL_TB
-
-        return self.base_demand_mbps * hourly_multiplier
+            self.user_type = "Heavy (Gaming/4K)" #eMBB
+            self.base_demand_mbps = np.random.uniform(10.0, 25.0)
+            
+        self.coverage_type = None  
+        self.tn_cell_id = None     
+        
+    def get_demand_at_time(self, hour): #diurnal function
+        """
+        Calculates demand using a continuous Diurnal Mathematical Function (Sum of Gaussians).
+        This models the daily sleep/wake cycle of a telecom network.
+        """
+        # Baseline traffic that never goes away (background app refreshes)
+        base_traffic = 0.2  
+        
+        # Noon Peak (Lunchtime browsing)
+        # Center = 12 (Noon), Width = 3 hours, Height = 0.5
+        noon_peak = 0.5 * np.exp(-((hour - 12.0)**2) / (2 * (3.0**2)))
+        
+        # Evening Peak (Prime-time gaming & streaming)
+        # Center = 20 (8:00 PM), Width = 2.5 hours, Height = 1.0
+        evening_peak = 1.0 * np.exp(-((hour - 20.0)**2) / (2 * (2.5**2)))
+        
+        # The diurnal multiplier applies the wave to the user's specific baseline
+        diurnal_multiplier = base_traffic + noon_peak + evening_peak
+        
+        return self.base_demand_mbps * diurnal_multiplier
 
     def update_location_steps(self, hour):
         """
-        STEPS Mobility Engine.
+        The STEPS Mobility Engine. Runs once every hour.
         """
-
+        # People move less at night (0-5 AM) and more during the day
         move_chance = 0.1 if (hour < 6 or hour > 22) else 0.4
-
+        
         if np.random.rand() < move_chance:
             chosen_idx = np.random.choice(len(self.attractors), p=self.attractor_probs)
             target_lat, target_lon = self.attractors[chosen_idx]
-
+            
+            # Move the user to the target, plus a tiny bit of random wandering
             self.lat = target_lat + np.random.normal(0, 0.005)
             self.lon = target_lon + np.random.normal(0, 0.005)
 
@@ -146,7 +188,7 @@ class User:
 
 
 # ==========================================
-# 3. GENERATE USERS & LOCATIONS
+# 2. GENERATE USERS & LOCATIONS
 # ==========================================
 
 np.random.seed(42)
@@ -182,7 +224,7 @@ coordinates = np.array([[u.lat, u.lon] for u in users])
 
 
 # ==========================================
-# 4. CLUSTERING & LEO THRESHOLD LOGIC
+# 3. CLUSTERING & LEO THRESHOLD LOGIC
 # ==========================================
 
 num_clusters = int(len(users) / 40)
@@ -217,7 +259,7 @@ print(f"Total TN Towers built (Passed threshold): {len(valid_tn_towers)}")
 
 
 # ==========================================
-# 5. EXPORT DATA TO CSV
+# 4. EXPORT DATA TO CSV
 # ==========================================
 
 time_steps = list(range(24))
@@ -227,6 +269,7 @@ for u in users:
     row_data = {
         "User_ID": u.user_id,
         "Home_TN_Cell": u.tn_cell_id,
+        'User_Profile': u.user_type,
         "Base_Demand_Mbps": round(u.base_demand_mbps, 2)
     }
 
@@ -245,7 +288,7 @@ print("✅ Saved moving users to CSV!")
 
 
 # ==========================================
-# 6. VISUALIZE THE RESULTS
+# 5. VISUALIZE THE RESULTS
 # ==========================================
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
@@ -317,7 +360,7 @@ plt.show()
 
 
 # ==========================================
-# 7. VISUALIZE THE RESULTS WITH HEXAGONS
+# 6. VISUALIZE THE RESULTS WITH HEXAGONS
 # ==========================================
 
 fig, ax = plt.subplots(figsize=(14, 12))
@@ -440,7 +483,7 @@ plt.show()
 
 
 # ==========================================
-# 8. GENERATE SYSTEM SUMMARY TABLE
+# 7. GENERATE SYSTEM SUMMARY TABLE
 # ==========================================
 
 print("Generating System Summary Table (Slide 2 format)...")
