@@ -80,7 +80,6 @@ def random_point_inside_ontario():
         if ONTARIO_PREPARED.contains(Point(lon, lat)):
             return lat, lon
 
-# Helpers to extract shape coordinates for Plotly
 def get_boundary_coords(geom):
     x_all, y_all = [], []
     polygons = geom.geoms if geom.geom_type == "MultiPolygon" else [geom]
@@ -187,7 +186,6 @@ city_weights = [0.70, 0.11, 0.09, 0.06, 0.02, 0.02]
 
 with st.spinner("Generating Population and Running STEPS Mobility..."):
     for i in range(num_city_users):
-        # Pick city based on actual population density weights
         center_idx = np.random.choice(len(city_centers), p=city_weights)
         center = city_centers[center_idx]
         users.append(User(user_id=i, lat=np.random.normal(center[0], 0.15), lon=np.random.normal(center[1], 0.15), active_profiles=active_profiles))
@@ -274,9 +272,9 @@ with st.spinner("Simulating Traffic Data..."):
 st.success(f"Simulation Complete. Built {len(valid_tn_towers)} Terrestrial Towers.")
 
 # ==========================================
-# DISPLAY TABS WITH PLOTLY (Interactive)
+# DISPLAY TABS WITH PLOTLY (Light/Academic Theme)
 # ==========================================
-tab1, tab2, tab3 = st.tabs(["Network Map", "Mobility and Density", "Generated Datasets"])
+tab1, tab2, tab3, tab4 = st.tabs(["Network Map", "Mobility and Density", "Traffic Analytics", "Data Export"])
 
 bx, by = get_boundary_coords(ONTARIO_GEOM)
 center_lat = (LAT_MIN + LAT_MAX) / 2
@@ -286,28 +284,31 @@ with tab1:
     st.subheader("Network Coverage: Terrestrial vs LEO Hexagonal Cells")
     fig1 = go.Figure()
     
-    fig1.add_trace(go.Scattermap(lat=by, lon=bx, mode='lines', line=dict(color='black', width=1.5), name='Ontario Boundary', hoverinfo='skip'))
+    # Black border for light map
+    fig1.add_trace(go.Scattermap(lat=by, lon=bx, mode='lines', line=dict(color='black', width=1.0), name='Ontario Boundary', hoverinfo='skip'))
     
     hx, hy = get_hex_grid_coords(hex_radius=0.6)
-    fig1.add_trace(go.Scattermap(lat=hy, lon=hx, mode='lines', line=dict(color='magenta', width=1.5), opacity=0.5, name=f'LEO Hexagons (H3 Res {H3_RESOLUTION})', hoverinfo='skip'))
+    fig1.add_trace(go.Scattermap(lat=hy, lon=hx, mode='lines', line=dict(color='magenta', width=1.5), opacity=0.4, name=f'LEO Hexagons (H3 Res {H3_RESOLUTION})', hoverinfo='skip'))
 
     tn_users_plot = np.array([[u.history_lat[0], u.history_lon[0]] for u in users if u.coverage_type == "TN"])
     leo_users_plot = np.array([[u.history_lat[0], u.history_lon[0]] for u in users if u.coverage_type == "LEO"])
 
     if len(leo_users_plot) > 0:
-        fig1.add_trace(go.Scattermap(lat=leo_users_plot[:, 0], lon=leo_users_plot[:, 1], mode='markers', marker=dict(color='green', size=5, opacity=0.7), name='LEO Users'))
+        fig1.add_trace(go.Scattermap(lat=leo_users_plot[:, 0], lon=leo_users_plot[:, 1], mode='markers', marker=dict(color='green', size=4, opacity=0.7), name='LEO Users'))
     if len(tn_users_plot) > 0:
-        fig1.add_trace(go.Scattermap(lat=tn_users_plot[:, 0], lon=tn_users_plot[:, 1], mode='markers', marker=dict(color='blue', size=5, opacity=0.4), name='TN Users'))
+        fig1.add_trace(go.Scattermap(lat=tn_users_plot[:, 0], lon=tn_users_plot[:, 1], mode='markers', marker=dict(color='blue', size=4, opacity=0.4), name='TN Users'))
 
     if len(valid_tn_towers) > 0:
-        fig1.add_trace(go.Scattermap(lat=valid_tn_towers[:, 0], lon=valid_tn_towers[:, 1], mode='markers', marker=dict(color='red', size=12, opacity=0.9), name='Active TN Towers'))
+        fig1.add_trace(go.Scattermap(lat=valid_tn_towers[:, 0], lon=valid_tn_towers[:, 1], mode='markers', marker=dict(color='red', size=10, opacity=0.9), name='Active TN Towers'))
 
-    fig1.add_trace(go.Scattermap(lat=[c[0] for c in city_centers], lon=[c[1] for c in city_centers], mode='text', text=city_names, textposition='bottom right', textfont=dict(color='black', size=14), name='Cities', hoverinfo='skip'))
+    # Black text with a semi-transparent white background
+    fig1.add_trace(go.Scattermap(lat=[c[0] for c in city_centers], lon=[c[1] for c in city_centers], mode='text', text=city_names, textposition='bottom right', textfont=dict(color='black', size=13), name='Cities', hoverinfo='skip'))
 
     fig1.update_layout(
         map=dict(style="carto-positron", center=dict(lat=center_lat, lon=center_lon), zoom=4.5),
         margin=dict(l=0, r=0, t=30, b=0),
-        height=700
+        height=700,
+        paper_bgcolor="white"
     )
     st.plotly_chart(fig1, width="stretch")
 
@@ -317,41 +318,70 @@ with tab2:
     
     with colA:
         fig2A = go.Figure()
-        fig2A.add_trace(go.Scattermap(lat=by, lon=bx, mode='lines', line=dict(color='black', width=1.5), showlegend=False, hoverinfo='skip'))
+        fig2A.add_trace(go.Scattermap(lat=by, lon=bx, mode='lines', line=dict(color='black', width=1.0), showlegend=False, hoverinfo='skip'))
         
         tracked_users = random.sample(users, 8)
-        plot_colors = ['orange', 'purple', 'cyan', 'magenta', 'yellow', 'brown', 'pink', 'gray']
+        plot_colors = ['orange', 'purple', 'cyan', 'magenta', 'yellow', 'brown', 'pink', 'green']
         
         for idx, u in enumerate(tracked_users):
-            fig2A.add_trace(go.Scattermap(lat=u.history_lat, lon=u.history_lon, mode='lines+markers', line=dict(color=plot_colors[idx]), marker=dict(size=6), name=f"User {u.user_id}"))
+            fig2A.add_trace(go.Scattermap(lat=u.history_lat, lon=u.history_lon, mode='lines+markers', line=dict(color=plot_colors[idx]), marker=dict(size=5), name=f"User {u.user_id}"))
             
         fig2A.add_trace(go.Scattermap(lat=[c[0] for c in city_centers], lon=[c[1] for c in city_centers], mode='text', text=city_names, textposition='bottom right', textfont=dict(color='black', size=11), showlegend=False, hoverinfo='skip'))
         
-        fig2A.update_layout(title="User Trajectories Over Time", map=dict(style="carto-positron", center=dict(lat=center_lat, lon=center_lon), zoom=4.2), height=550, margin=dict(l=0, r=0, t=40, b=0))
+        fig2A.update_layout(title="User Trajectories Over Time", map=dict(style="carto-positron", center=dict(lat=center_lat, lon=center_lon), zoom=4.2), height=550, margin=dict(l=0, r=0, t=40, b=0), paper_bgcolor="white")
         st.plotly_chart(fig2A, width="stretch")
 
     with colB:
         fig2B = go.Figure()
-        fig2B.add_trace(go.Scattermap(lat=by, lon=bx, mode='lines', line=dict(color='black', width=1.5), showlegend=False, hoverinfo='skip'))
+        fig2B.add_trace(go.Scattermap(lat=by, lon=bx, mode='lines', line=dict(color='black', width=1.0), showlegend=False, hoverinfo='skip'))
         
         all_lats, all_lons = [], []
         for u in users:
             all_lats.extend(u.history_lat)
             all_lons.extend(u.history_lon)
             
-        fig2B.add_trace(go.Scattermap(lat=all_lats, lon=all_lons, mode='markers', marker=dict(color='black', size=4, opacity=0.03), showlegend=False))
+        # Changed the density points back to black
+        fig2B.add_trace(go.Scattermap(lat=all_lats, lon=all_lons, mode='markers', marker=dict(color='black', size=3, opacity=0.03), showlegend=False))
         fig2B.add_trace(go.Scattermap(lat=[c[0] for c in city_centers], lon=[c[1] for c in city_centers], mode='text', text=city_names, textposition='bottom right', textfont=dict(color='black', size=11), showlegend=False, hoverinfo='skip'))
         
-        fig2B.update_layout(title="Spatial Attractor Density", map=dict(style="carto-positron", center=dict(lat=center_lat, lon=center_lon), zoom=4.2), height=550, margin=dict(l=0, r=0, t=40, b=0))
+        fig2B.update_layout(title="Spatial Attractor Density", map=dict(style="carto-positron", center=dict(lat=center_lat, lon=center_lon), zoom=4.2), height=550, margin=dict(l=0, r=0, t=40, b=0), paper_bgcolor="white")
         st.plotly_chart(fig2B, width="stretch")
 
 with tab3:
-    st.subheader("Export Datasets")
-    st.markdown("Note: Scroll down or right to see all rows and columns.")
+    st.subheader("24-Hour Network Traffic Profile")
+    st.markdown("Visualizing the continuous Multi-Gaussian diurnal traffic wave.")
+    
+    # Plotly Line Chart for Traffic (Light Mode)
+    fig3 = go.Figure()
+    
+    # Total Demand (Dark Blue)
+    fig3.add_trace(go.Scatter(x=df_summary['Time Step'], y=df_summary['demand_mbps'], mode='lines', name='Total Demand (Mbps)', line=dict(color='#000080', width=3)))
+    # TN Served (Standard Blue)
+    fig3.add_trace(go.Scatter(x=df_summary['Time Step'], y=df_summary['served_tn_mbps'], mode='lines', name='Served by TN', line=dict(color='#1E90FF', width=2, dash='dash')))
+    # LEO Overflow (Red/Magenta)
+    fig3.add_trace(go.Scatter(x=df_summary['Time Step'], y=df_summary['served_ntn_mbps'], mode='lines', name='Overflow to LEO', line=dict(color='#D2042D', width=2, dash='dot')))
+    
+    fig3.update_layout(
+        xaxis_title="Time of Day", 
+        yaxis_title="Data Load (Mbps)", 
+        template="plotly_white",  # Changed to clean white background
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    
+    fig3.update_xaxes(tickformat="%H:%M", showgrid=True, gridcolor='lightgrey')
+    fig3.update_yaxes(showgrid=True, gridcolor='lightgrey')
+    
+    st.plotly_chart(fig3, width="stretch")
+
+with tab4:
+    st.subheader("Data Exports")
+    st.markdown("Raw data generated by the simulation engine.")
     
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown("**1. User Movement and Demand Data**")
+        st.markdown("**1. User Movement & Demand Data**")
         st.dataframe(df_users, width="stretch")
         csv1 = df_users.to_csv(index=False).encode('utf-8')
         st.download_button("Download simulated_users.csv", data=csv1, file_name="simulated_users_data_with_STEPS.csv", mime="text/csv")
