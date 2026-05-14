@@ -206,9 +206,15 @@ city_centers = [
     (46.49, -81.01)   # Sudbury
 ]
 
+# Real-world relative population weights for the 6 cities
+# Toronto (70%), Ottawa (11%), Hamilton (9%), London (6%), Kingston (2%), Sudbury (2%)
+city_weights = [0.70, 0.11, 0.09, 0.06, 0.02, 0.02]
+
 # Generate dense city users
 for i in range(num_city_users):
-    center = city_centers[np.random.randint(0, len(city_centers))]
+    # Use np.random.choice to pick a city based on the real-world weights
+    center_idx = np.random.choice(len(city_centers), p=city_weights)
+    center = city_centers[center_idx]
 
     lat = np.random.normal(center[0], 0.15)
     lon = np.random.normal(center[1], 0.15)
