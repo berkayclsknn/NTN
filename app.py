@@ -21,7 +21,7 @@ st.markdown("A spatio-temporal simulation engine for 5G heterogeneous networks."
 st.sidebar.header("Simulation Parameters")
 
 st.sidebar.subheader("1. Population Settings")
-TOTAL_USERS = st.sidebar.slider("Total Simulated Users", min_value=500, max_value=2000, value=1000, step=100)
+TOTAL_USERS = st.sidebar.slider("Total Simulated Users", min_value=500, max_value=5000, value=1000, step=500)
 CITY_RATIO = st.sidebar.slider("City vs Rural Ratio", min_value=0.1, max_value=0.9, value=0.7, step=0.1)
 
 num_city_users = int(TOTAL_USERS * CITY_RATIO)
@@ -91,13 +91,9 @@ def get_boundary_coords(geom):
     return x_all, y_all
 
 def get_hex_grid_coords(hex_radius):
-    # 1. Mapbox Projection Fix (Aspect Ratio)
-    # 1 degree of longitude is shorter than 1 degree of latitude in Canada.
-    # We calculate an aspect ratio multiplier to prevent them from looking "squished".
     mean_lat = (LAT_MIN + LAT_MAX) / 2.0
     aspect_ratio = 1.0 / np.cos(np.radians(mean_lat))
     
-    # 2. Flat-Topped Hexagon Spacing Math
     horiz_spacing = np.sqrt(3) * hex_radius * aspect_ratio
     vert_spacing = 1.5 * hex_radius
     
@@ -105,8 +101,6 @@ def get_hex_grid_coords(hex_radius):
     cols = int((LON_MAX - LON_MIN) / horiz_spacing) + 2
     
     hex_x, hex_y = [], []
-    
-    # 3. Rotate angles by 30 degrees (pi/6) to draw Flat-Topped hexagons
     angles = np.linspace(0, 2 * np.pi, 7) + (np.pi / 6)
     cos_a, sin_a = np.cos(angles), np.sin(angles)
     
@@ -114,22 +108,16 @@ def get_hex_grid_coords(hex_radius):
         for col in range(cols):
             y = LAT_MIN + row * vert_spacing
             x = LON_MIN + col * horiz_spacing
-            
-            # Stagger every other row so they interlock
             if row % 2 == 1: 
                 x += horiz_spacing / 2
             
-            # Skip if the center is outside Ontario
             if not ONTARIO_PREPARED.contains(Point(x, y)):
                 continue
                 
-            # Draw the vertices, applying the aspect ratio stretch to the X-axis
             x_verts = x + (hex_radius * aspect_ratio) * cos_a
             y_verts = y + hex_radius * sin_a
-            
             hex_x.extend(x_verts.tolist() + [None])
             hex_y.extend(y_verts.tolist() + [None])
-            
     return hex_x, hex_y
 
 class User:
@@ -194,9 +182,14 @@ users = []
 city_centers = [(43.65, -79.38), (45.42, -75.69), (43.25, -79.87), (42.98, -81.25), (44.23, -76.49), (46.49, -81.01)]
 city_names = ['Toronto', 'Ottawa', 'Hamilton', 'London', 'Kingston', 'Sudbury']
 
-with st.spinner("Generating Population & Running STEPS Mobility..."):
+# Toronto (70%), Ottawa (11%), Hamilton (9%), London (6%), Kingston (2%), Sudbury (2%)
+city_weights = [0.70, 0.11, 0.09, 0.06, 0.02, 0.02]
+
+with st.spinner("Generating Population and Running STEPS Mobility..."):
     for i in range(num_city_users):
-        center = city_centers[np.random.randint(0, len(city_centers))]
+        # Pick city based on actual population density weights
+        center_idx = np.random.choice(len(city_centers), p=city_weights)
+        center = city_centers[center_idx]
         users.append(User(user_id=i, lat=np.random.normal(center[0], 0.15), lon=np.random.normal(center[1], 0.15), active_profiles=active_profiles))
 
     for i in range(num_city_users, TOTAL_USERS):
@@ -236,7 +229,7 @@ with st.spinner("Simulating Traffic Data..."):
         user_data_export.append(row_data)
 
     df_users = pd.DataFrame(user_data_export)
-    df_users['Home_TN_Cell'] = df_users['Home_TN_Cell'].astype(str)
+    df_users['Home_TN_Cell'] = df_users['Home_TN_Cell'].astype(str) 
 
     LEO_TOTAL_CAPACITY_MBPS = 15000
     SCALE_FACTOR = 500
@@ -281,9 +274,9 @@ with st.spinner("Simulating Traffic Data..."):
 st.success(f"Simulation Complete. Built {len(valid_tn_towers)} Terrestrial Towers.")
 
 # ==========================================
-# DISPLAY TABS WITH PLOTLY (Interactive & Updated)
+# DISPLAY TABS WITH PLOTLY (Interactive)
 # ==========================================
-tab1, tab2, tab3 = st.tabs(["Network Map", "Mobility & Density", "Generated Datasets"])
+tab1, tab2, tab3 = st.tabs(["Network Map", "Mobility and Density", "Generated Datasets"])
 
 bx, by = get_boundary_coords(ONTARIO_GEOM)
 center_lat = (LAT_MIN + LAT_MAX) / 2
@@ -311,7 +304,6 @@ with tab1:
 
     fig1.add_trace(go.Scattermap(lat=[c[0] for c in city_centers], lon=[c[1] for c in city_centers], mode='text', text=city_names, textposition='bottom right', textfont=dict(color='black', size=14), name='Cities', hoverinfo='skip'))
 
-    # FIXED: Replaced mapbox=dict() with map=dict()
     fig1.update_layout(
         map=dict(style="carto-positron", center=dict(lat=center_lat, lon=center_lon), zoom=4.5),
         margin=dict(l=0, r=0, t=30, b=0),
@@ -359,7 +351,7 @@ with tab3:
     
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown("**1. User Movement & Demand Data**")
+        st.markdown("**1. User Movement and Demand Data**")
         st.dataframe(df_users, width="stretch")
         csv1 = df_users.to_csv(index=False).encode('utf-8')
         st.download_button("Download simulated_users.csv", data=csv1, file_name="simulated_users_data_with_STEPS.csv", mime="text/csv")
