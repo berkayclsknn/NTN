@@ -1,12 +1,22 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-from sklearn.cluster import KMeans
-import random
 import yaml
-from shapely.geometry import shape, Point
-from shapely.prepared import prep
+import os
+import streamlit.components.v1 as components
+from omegaconf import OmegaConf
+import plotly.graph_objects as go
+import random
+
+# Import the team's modular architecture
+from hybrid_ntn_optimizer.models.scenario import Region
+from hybrid_ntn_optimizer.core.types import WalkerParameters, OrbitType
+from hybrid_ntn_optimizer.constellation.leo import LEOConstellation
+from hybrid_ntn_optimizer.coverage.mapper import tessellate_region
+from hybrid_ntn_optimizer.traffic.profiles import generate_users
+from hybrid_ntn_optimizer.terrestrial.coverage import generate_terrestrial_network
+from hybrid_ntn_optimizer.simulation.full_pipeline import run_daily_mobility_simulation
+from hybrid_ntn_optimizer.visualization.plots import plot_master_hybrid_animation
 
 # ==========================================
 # STREAMLIT PAGE CONFIGURATION
@@ -21,65 +31,220 @@ st.markdown("A spatio-temporal simulation engine for 5G heterogeneous networks."
 st.sidebar.header("Simulation Parameters")
 
 st.sidebar.subheader("1. Population Settings")
-TOTAL_USERS = st.sidebar.slider("Total Simulated Users", min_value=500, max_value=5000, value=1000, step=500)
+TOTAL_USERS = st.sidebar.slider("Total Simulated Users", min_value=0, max_value=5000, value=1000, step=500)
 CITY_RATIO = st.sidebar.slider("City vs Rural Ratio", min_value=0.1, max_value=0.9, value=0.7, step=0.1)
 
-num_city_users = int(TOTAL_USERS * CITY_RATIO)
-num_rural_users = TOTAL_USERS - num_city_users
-
 st.sidebar.subheader("2. Infrastructure Settings")
-TN_POP_THRESHOLD = st.sidebar.slider("Tower Threshold (Min Users)", min_value=10, max_value=100, value=50, step=5)
+TN_POP_THRESHOLD = st.sidebar.slider("Tower Threshold (Min Users)", min_value=10, max_value=100, value=20, step=5)
 TN_BS_CAPACITY_GBPS = st.sidebar.slider("TN Tower Capacity (Gbps)", min_value=1, max_value=50, value=10, step=1)
 TN_BS_CAPACITY_MBPS = TN_BS_CAPACITY_GBPS * 1000
 
-st.sidebar.subheader("3. Diurnal Traffic Model")
-EVENING_PEAK_HOUR = st.sidebar.slider(
-    "Evening Peak Time (Hour)", 
-    min_value=16.0, 
-    max_value=23.0, 
-    value=20.0, 
-    step=0.5,
-    help="Shifts the center of the Gaussian evening traffic peak (e.g., 20.0 is 8:00 PM)."
-)
+# NEW: Advanced 5G RF Parameters hidden inside a clean dropdown expander!
+with st.sidebar.expander("Advanced 5G RF Parameters"):
+    TN_COVERAGE_RADIUS = st.slider("Coverage Radius (km)", min_value=1.0, max_value=50.0, value=10.0, step=1.0)
+    TN_P_TX = st.slider("BS Transmit Power (dBm)", min_value=20.0, max_value=60.0, value=43.0, step=1.0)
+    TN_G_TX = st.slider("BS Antenna Gain (dBi)", min_value=0.0, max_value=30.0, value=15.0, step=1.0)
+    TN_G_RX = st.slider("UE Receive Gain (dBi)", min_value=-10.0, max_value=10.0, value=0.0, step=1.0)
+    
+    # We display GHz/MHz for the user, but will multiply by 1e9/1e6 for the backend code
+    TN_FREQ_GHZ = st.slider("Carrier Frequency (GHz)", min_value=0.5, max_value=6.0, value=3.5, step=0.1)
+    TN_BW_MHZ = st.slider("Bandwidth (MHz)", min_value=10, max_value=400, value=100, step=10)
+    
+    TN_SINR_MIN = st.slider("Min SINR (dB)", min_value=-10.0, max_value=10.0, value=-3.0, step=0.5)
+    TN_SHADOWING = st.slider("Shadowing Std Dev (dB)", min_value=0.0, max_value=20.0, value=8.0, step=0.5)
+    TN_BODY_LOSS = st.slider("Body/Penetration Loss (dB)", min_value=0.0, max_value=15.0, value=3.0, step=0.5)
 
-st.sidebar.subheader("4. User Traffic Profiles")
+st.sidebar.subheader("3. LEO Constellation Settings")
+SAT_ALTITUDE = st.sidebar.slider("Satellite Altitude (km)", min_value=300.0, max_value=1500.0, value=550.0, step=50.0)
+TOTAL_SATS = st.sidebar.select_slider("Total Satellites in Constellation", options=[72, 324, 648, 1584, 4000], value=1584)
+SAT_EIRP = st.sidebar.slider("Satellite EIRP (dBW)", min_value=20.0, max_value=60.0, value=50.0, step=1.0)
+
+st.sidebar.subheader("4. Diurnal Traffic Model")
+EVENING_PEAK_HOUR = st.sidebar.slider("Evening Peak Time (Hour)", min_value=16.0, max_value=23.0, value=20.0, step=0.5)
+
+st.sidebar.subheader("5. User Traffic Profiles")
 st.sidebar.caption("Check the boxes to include these 3GPP usage scenarios.")
 use_light = st.sidebar.checkbox("Light Users (mMTC | 0.1 - 1 Mbps)", value=True)
 use_medium = st.sidebar.checkbox("Medium Users (Nominal | 1.5 - 5 Mbps)", value=True)
 use_heavy = st.sidebar.checkbox("Heavy Users (eMBB | 10 - 25 Mbps)", value=True)
 
-active_profiles = []
-if use_light: active_profiles.append("Light")
-if use_medium: active_profiles.append("Medium")
-if use_heavy: active_profiles.append("Heavy")
-
-if len(active_profiles) == 0:
+active_count = sum([use_light, use_medium, use_heavy])
+if active_count == 0:
     st.sidebar.error("Please select at least one user profile to run the simulation.")
     st.stop()
+prob_share = 1.0 / active_count
+
+st.sidebar.subheader("6. Simulation Engine")
+SIM_DURATION = st.sidebar.slider("Simulation Duration (Seconds)", min_value=3600, max_value=86400, value=21600, step=3600)
+TIME_STEP = st.sidebar.slider("Time Step (Seconds)", min_value=600, max_value=3600, value=3600, step=600)
 
 st.sidebar.markdown("---")
-st.sidebar.info("Note: The dashboard is live. Adjusting any parameter will update the simulation automatically.")
+st.sidebar.info("Note: The dashboard is live. Adjusting any parameter will update the backend simulation automatically.")
 
 # ==========================================
-# DATA & CLASSES
+# DYNAMIC CONFIGURATION BUILDER
 # ==========================================
-@st.cache_resource 
-def load_ontario_map():
-    with open("E:\\berkay\\NTN\\ontario_full.yaml", "r", encoding="utf-8") as f:
+# We load the map boundaries from YAML
+with open(r"E:\berkay\NTN\configs\scenario\ontario_full.yaml", "r", encoding="utf-8") as f:
         ontario_yaml = yaml.safe_load(f)
-    geom = shape(ontario_yaml["geojson_geometry"])
-    return prep(geom), geom, geom.bounds, ontario_yaml.get("h3_resolution", 2)
 
-ONTARIO_PREPARED, ONTARIO_GEOM, BOUNDS, H3_RESOLUTION = load_ontario_map()
-LON_MIN, LAT_MIN, LON_MAX, LAT_MAX = BOUNDS
+# We bridge the Streamlit Sliders directly into the team's OmegaConf structure
+# We bridge the Streamlit Sliders directly into the team's OmegaConf structure
+cfg = OmegaConf.create({
+    "random_seed": 42,
+    "epoch_utc": "2024-01-01T00:00:00",  # From base.yaml
+    "scenario": {
+        "name": "Ontario_Province",
+        "h3_resolution": ontario_yaml.get("h3_resolution", 3),
+        "geojson_geometry": ontario_yaml["geojson_geometry"]
+    },
+    "constellation": {
+        "name": "Live-Simulation-Shell",
+        "total_satellites": TOTAL_SATS,
+        "num_planes": 72 if TOTAL_SATS == 1584 else max(1, int(TOTAL_SATS/18)), 
+        "phasing": 1,
+        "inclination_deg": 53.0,
+        "altitude_km": SAT_ALTITUDE,
+        "eirp_dbw": SAT_EIRP,
+        "g_t_db": -25.12,                    # Updated from constellation.yaml
+        "min_elevation_deg": 25.0,
+        "apply_j2": True,
+        "max_spot_beams": 32,                # Updated from constellation.yaml
+        "beam_radius_nadir_km": 120.0,
+        "max_steering_angle_deg": 45.0,
+        "freq_ghz": 2.2,                     # Updated from constellation.yaml (S-Band Direct to Cell)
+        "bandwidth_hz": 40000000,            # Updated from constellation.yaml (40 MHz)
+        "sinr_min_db": 0.0,
+        "theta_3db_deg": 2.5,
+        "sll_db": 25.0,
+        "weather_loss_db": 1.0               # Added from constellation.yaml
+    },
+    "population": {
+        "total_city_users": int(TOTAL_USERS * CITY_RATIO),
+        "total_rural_users": TOTAL_USERS - int(TOTAL_USERS * CITY_RATIO),
+        "city_scatter_std_dev": 0.15,
+        "cities": {
+            "Toronto": {"coords": [43.65, -79.38], "weight": 0.70},
+            "Ottawa": {"coords": [45.42, -75.69], "weight": 0.11},
+            "Hamilton": {"coords": [43.25, -79.87], "weight": 0.09},
+            "London": {"coords": [42.98, -81.25], "weight": 0.06},
+            "Kingston": {"coords": [44.23, -76.49], "weight": 0.02},
+            "Sudbury": {"coords": [46.49, -81.01], "weight": 0.02}
+        },
+        "mobility": {
+            "num_attractors": 3,
+            "zipf_alpha": 1.2,
+            "pareto_beta": 1.75,
+            "delta_r0_km": 1.5,
+            "cutoff_kappa_km": 80.0,
+            "night_hours_start": 22,
+            "night_hours_end": 6,
+            "night_move_chance": 0.1,
+            "day_move_chance": 0.4,
+            "gps_wander_std_dev": 0.005
+        },
+        "traffic": {
+            "diurnal_curve": {
+                "base_traffic_multiplier": 0.2,
+                "noon_peak": {"center_hour": 12.0, "width_hours": 3.0, "height_multiplier": 0.5},
+                "evening_peak": {"center_hour": EVENING_PEAK_HOUR, "width_hours": 2.5, "height_multiplier": 1.0}
+            },
+            "profiles": {} 
+        }
+    },
+    "terrestrial": {
+        "density_threshold": TN_POP_THRESHOLD,
+        "bs_capacity_mbps": float(TN_BS_CAPACITY_MBPS),
+        "users_per_cluster_ratio": 20,       
+        "p_tx_dbm": TN_P_TX,
+        "g_tx_dbi": TN_G_TX,
+        "g_rx_ue_dbi": TN_G_RX,
+        "carrier_freq_hz": TN_FREQ_GHZ * 1e9,   # Converts GHz slider to Hz
+        "bandwidth_hz": TN_BW_MHZ * 1e6,        # Converts MHz slider to Hz
+        "sinr_min_db": TN_SINR_MIN,
+        "shadowing_std_dev_db": TN_SHADOWING,         
+        "body_loss_db": TN_BODY_LOSS,
+        "use_physical_radius": True,
+        "fixed_coverage_radius_km": True,    
+        "coverage_radius_km": TN_COVERAGE_RADIUS           
+    },
+    "simulation": {
+        "duration_s": SIM_DURATION,
+        "time_step_s": TIME_STEP,
+        "beam_capacity_mbps": 500.0          # Added from base.yaml
+    }
+})
 
-def random_point_inside_ontario():
-    while True:
-        lon = np.random.uniform(LON_MIN, LON_MAX)
-        lat = np.random.uniform(LAT_MIN, LAT_MAX)
-        if ONTARIO_PREPARED.contains(Point(lon, lat)):
-            return lat, lon
+# Inject the selected user profiles dynamically into the config
+if use_light: cfg.population.traffic.profiles.light = {"probability": prob_share, "min_mbps": 0.1, "max_mbps": 1.0}
+if use_medium: cfg.population.traffic.profiles.medium = {"probability": prob_share, "min_mbps": 1.5, "max_mbps": 5.0}
+if use_heavy: cfg.population.traffic.profiles.heavy = {"probability": prob_share, "min_mbps": 10.0, "max_mbps": 25.0}
 
+
+# ==========================================
+# SIMULATION EXECUTION
+# ==========================================
+with st.spinner("Executing Geographic Tessellation..."):
+    active_region = Region(name=cfg.scenario.name, geojson_geometry=cfg.scenario.geojson_geometry, h3_resolution=cfg.scenario.h3_resolution)
+    tessellate_region(active_region, pad_edges=True)
+
+with st.spinner("Deploying LEO Satellite Constellation & SGP4 Propagators..."):
+    walker_params = WalkerParameters(
+        total_satellites=cfg.constellation.total_satellites,
+        num_planes=cfg.constellation.num_planes,
+        phasing=cfg.constellation.phasing,
+        inclination_deg=cfg.constellation.inclination_deg,
+        altitude_km=cfg.constellation.altitude_km,
+        orbit_type=OrbitType.LEO
+    )
+    leo = LEOConstellation(
+        params=walker_params,
+        name=cfg.constellation.name,
+        eirp_dbw=cfg.constellation.eirp_dbw,
+        g_t_db=cfg.constellation.g_t_db,
+        max_spot_beams=cfg.constellation.max_spot_beams,
+        beam_radius_nadir_km=cfg.constellation.beam_radius_nadir_km,
+        max_steering_angle_deg=cfg.constellation.max_steering_angle_deg
+    )
+
+with st.spinner("Spawning Heterogeneous User Population..."):
+    users = generate_users(cfg, active_region)
+
+with st.spinner("Executing K-Means for Terrestrial Infrastructure..."):
+    towers = generate_terrestrial_network(cfg, users, active_region.h3_resolution)
+
+with st.spinner("Running Master RF Simulation Loop (Link Budgets & Admission Control)..."):
+    beam_animation_data, user_animation_data = run_daily_mobility_simulation(
+        cfg=cfg, users=users, base_stations=towers, leo=leo, region=active_region
+    )
+
+with st.spinner("Compiling Final HTML Visualizations..."):
+    html_filename = "Final_Animation.html"
+    plot_master_hybrid_animation(
+        region=active_region, 
+        users=users, 
+        base_stations=towers, 
+        beam_data=beam_animation_data, 
+        user_data=user_animation_data,
+        duration_s=cfg.simulation.duration_s, 
+        time_step_s=cfg.simulation.time_step_s,
+        filename=html_filename
+    )
+
+st.success("Simulation Complete. Results are rendered below.")
+# ==========================================
+# MAP HELPERS FOR TABS 
+# ==========================================
+from shapely.geometry import shape
+
+# 1. Load the Ontario Geography
+with open(r"E:\berkay\NTN\configs\scenario\ontario_full.yaml", "r", encoding="utf-8") as f:
+    ontario_yaml = yaml.safe_load(f)
+
+ONTARIO_GEOM = shape(ontario_yaml["geojson_geometry"])
+LON_MIN, LAT_MIN, LON_MAX, LAT_MAX = ONTARIO_GEOM.bounds
+
+# 2. Re-define the Boundary Extractor
 def get_boundary_coords(geom):
     x_all, y_all = [], []
     polygons = geom.geoms if geom.geom_type == "MultiPolygon" else [geom]
@@ -89,291 +254,106 @@ def get_boundary_coords(geom):
         y_all.extend(list(y) + [None])
     return x_all, y_all
 
-def get_hex_grid_coords(hex_radius):
-    mean_lat = (LAT_MIN + LAT_MAX) / 2.0
-    aspect_ratio = 1.0 / np.cos(np.radians(mean_lat))
-    
-    horiz_spacing = np.sqrt(3) * hex_radius * aspect_ratio
-    vert_spacing = 1.5 * hex_radius
-    
-    rows = int((LAT_MAX - LAT_MIN) / vert_spacing) + 2
-    cols = int((LON_MAX - LON_MIN) / horiz_spacing) + 2
-    
-    hex_x, hex_y = [], []
-    angles = np.linspace(0, 2 * np.pi, 7) + (np.pi / 6)
-    cos_a, sin_a = np.cos(angles), np.sin(angles)
-    
-    for row in range(rows):
-        for col in range(cols):
-            y = LAT_MIN + row * vert_spacing
-            x = LON_MIN + col * horiz_spacing
-            if row % 2 == 1: 
-                x += horiz_spacing / 2
-            
-            if not ONTARIO_PREPARED.contains(Point(x, y)):
-                continue
-                
-            x_verts = x + (hex_radius * aspect_ratio) * cos_a
-            y_verts = y + hex_radius * sin_a
-            hex_x.extend(x_verts.tolist() + [None])
-            hex_y.extend(y_verts.tolist() + [None])
-    return hex_x, hex_y
-
-class User:
-    def __init__(self, user_id, lat, lon, active_profiles):
-        self.user_id = user_id
-        
-        num_attractors = 3
-        ranks = np.arange(1, num_attractors + 1)
-        raw_probs = 1.0 / (ranks ** 1.2)
-        self.attractor_probs = raw_probs / np.sum(raw_probs)
-        
-        beta, delta_r0, kappa = 1.75, 1.5, 80.0 
-        self.home_lat, self.home_lon = lat, lon
-        self.attractors = [(self.home_lat, self.home_lon)]
-        
-        for _ in range(num_attractors - 1):
-            accepted = False
-            r_km = 0.0
-            while not accepted:
-                r_km = np.random.pareto(beta - 1.0) * delta_r0
-                if np.random.rand() < np.exp(-r_km / kappa):
-                    accepted = True
-            r_deg = r_km / 111.0
-            theta = np.random.uniform(0, 2 * np.pi)
-            self.attractors.append((self.home_lat + (r_deg * np.sin(theta)), self.home_lon + (r_deg * np.cos(theta))))
-            
-        self.lat, self.lon = self.home_lat, self.home_lon
-        self.history_lat, self.history_lon = [self.lat], [self.lon]        
-        
-        profile_roll = np.random.choice(active_profiles)
-        if profile_roll == "Light": 
-            self.user_type, self.base_demand_mbps = "Light (Text/Web)", np.random.uniform(0.1, 1.0)
-        elif profile_roll == "Medium":
-            self.user_type, self.base_demand_mbps = "Medium (Social/Video)", np.random.uniform(1.5, 5.0)
-        elif profile_roll == "Heavy":
-            self.user_type, self.base_demand_mbps = "Heavy (Gaming/4K)", np.random.uniform(10.0, 25.0)
-            
-        self.coverage_type, self.tn_cell_id = None, None     
-        
-    def get_demand_at_time(self, hour, evening_peak_hr):
-        base_traffic = 0.2  
-        noon_peak = 0.5 * np.exp(-((hour - 12.0)**2) / (2 * (3.0**2)))
-        evening_peak = 1.0 * np.exp(-((hour - evening_peak_hr)**2) / (2 * (2.5**2)))
-        diurnal_multiplier = base_traffic + noon_peak + evening_peak
-        return self.base_demand_mbps * diurnal_multiplier
-
-    def update_location_steps(self, hour):
-        move_chance = 0.1 if (hour < 6 or hour > 22) else 0.4
-        if np.random.rand() < move_chance:
-            chosen_idx = np.random.choice(len(self.attractors), p=self.attractor_probs)
-            target_lat, target_lon = self.attractors[chosen_idx]
-            self.lat = target_lat + np.random.normal(0, 0.005)
-            self.lon = target_lon + np.random.normal(0, 0.005)
-        self.history_lat.append(self.lat)
-        self.history_lon.append(self.lon)
-
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
-np.random.seed(42)
-users = []
-city_centers = [(43.65, -79.38), (45.42, -75.69), (43.25, -79.87), (42.98, -81.25), (44.23, -76.49), (46.49, -81.01)]
+# 3. Re-define the Cities for the Map Labels
+city_centers = [
+    (43.65, -79.38), (45.42, -75.69), (43.25, -79.87), 
+    (42.98, -81.25), (44.23, -76.49), (46.49, -81.01)
+]
 city_names = ['Toronto', 'Ottawa', 'Hamilton', 'London', 'Kingston', 'Sudbury']
-
-# Toronto (70%), Ottawa (11%), Hamilton (9%), London (6%), Kingston (2%), Sudbury (2%)
-city_weights = [0.70, 0.11, 0.09, 0.06, 0.02, 0.02]
-
-with st.spinner("Generating Population and Running STEPS Mobility..."):
-    for i in range(num_city_users):
-        center_idx = np.random.choice(len(city_centers), p=city_weights)
-        center = city_centers[center_idx]
-        users.append(User(user_id=i, lat=np.random.normal(center[0], 0.15), lon=np.random.normal(center[1], 0.15), active_profiles=active_profiles))
-
-    for i in range(num_city_users, TOTAL_USERS):
-        lat, lon = random_point_inside_ontario()
-        users.append(User(user_id=i, lat=lat, lon=lon, active_profiles=active_profiles))
-
-    coordinates = np.array([[u.lat, u.lon] for u in users])
-
-with st.spinner("Clustering TN Towers..."):
-    num_clusters = int(TOTAL_USERS / 40)
-    kmeans = KMeans(n_clusters=num_clusters, random_state=42, n_init=10)
-    cluster_labels = kmeans.fit_predict(coordinates)
-    potential_tn_locations = kmeans.cluster_centers_
-    cluster_counts = pd.Series(cluster_labels).value_counts()
-    valid_tn_towers = []
-
-    for i, user in enumerate(users):
-        cluster_id = cluster_labels[i]
-        if cluster_counts[cluster_id] > TN_POP_THRESHOLD:
-            user.coverage_type, user.tn_cell_id = "TN", cluster_id
-        else:
-            user.coverage_type, user.tn_cell_id = "LEO", "N/A (LEO)"
-
-    for cluster_id, count in cluster_counts.items():
-        if count > TN_POP_THRESHOLD:
-            valid_tn_towers.append(potential_tn_locations[cluster_id])
-    valid_tn_towers = np.array(valid_tn_towers)
-
-with st.spinner("Simulating Traffic Data..."):
-    user_data_export = []
-    for u in users:
-        row_data = {'User_ID': u.user_id, 'Home_TN_Cell': u.tn_cell_id, 'User_Profile': u.user_type, 'Base_Demand_Mbps': round(u.base_demand_mbps, 2)}
-        for hour in range(24):
-            row_data[f"Demand_Hour_{hour}"] = round(u.get_demand_at_time(hour, EVENING_PEAK_HOUR), 2)
-            u.update_location_steps(hour)
-            row_data[f"Lat_Hour_{hour}"], row_data[f"Lon_Hour_{hour}"] = round(u.lat, 4), round(u.lon, 4)
-        user_data_export.append(row_data)
-
-    df_users = pd.DataFrame(user_data_export)
-    df_users['Home_TN_Cell'] = df_users['Home_TN_Cell'].astype(str) 
-
-    LEO_TOTAL_CAPACITY_MBPS = 15000
-    SCALE_FACTOR = 500
-    time_series = pd.date_range(start="2025-01-01 00:00", end="2025-01-01 23:30", freq="30min")
-    summary_data = []
-
-    for ts in time_series:
-        current_hour = ts.hour + (ts.minute / 60.0) 
-        total_demand = total_served_tn = total_served_ntn = 0.0
-        tn_tower_loads = {tower_id: 0.0 for tower_id in range(num_clusters)}
-        leo_total_load = 0.0
-        
-        for u in users:
-            user_demand = u.get_demand_at_time(current_hour, EVENING_PEAK_HOUR)
-            total_demand += user_demand
-            if u.coverage_type == "TN" and u.tn_cell_id != "N/A (LEO)":
-                tn_tower_loads[u.tn_cell_id] += user_demand
-            else:
-                leo_total_load += user_demand
-                
-        for tower_id, load in tn_tower_loads.items():
-            if load <= TN_BS_CAPACITY_MBPS:
-                total_served_tn += load
-            else:
-                total_served_tn += TN_BS_CAPACITY_MBPS
-                leo_total_load += load - TN_BS_CAPACITY_MBPS
-
-        current_leo_cap = LEO_TOTAL_CAPACITY_MBPS * np.random.uniform(0.98, 1.02)
-        if leo_total_load <= current_leo_cap:
-            total_served_ntn += leo_total_load
-        else:
-            total_served_ntn += current_leo_cap
-
-        summary_data.append({
-            "Time Step": ts.strftime("%Y-%m-%d %H:%M"),
-            "demand_mbps": round(total_demand * SCALE_FACTOR, 5),
-            "served_tn_mbps": round(total_served_tn * SCALE_FACTOR, 5),
-            "served_ntn_mbps": round(total_served_ntn * SCALE_FACTOR, 5)
-        })
-    df_summary = pd.DataFrame(summary_data)
-
-st.success(f"Simulation Complete. Built {len(valid_tn_towers)} Terrestrial Towers.")
-
 # ==========================================
-# DISPLAY TABS WITH PLOTLY (Light/Academic Theme)
+# DISPLAY DASHBOARD
 # ==========================================
-tab1, tab2, tab3, tab4 = st.tabs(["Network Map", "Mobility and Density", "Traffic Analytics", "Data Export"])
+tab1, tab2, tab3, tab4 = st.tabs(["Interactive Simulation Map", "STEPS Mobility", "Traffic Analytics", "Generated Datasets"])
 
-bx, by = get_boundary_coords(ONTARIO_GEOM)
-center_lat = (LAT_MIN + LAT_MAX) / 2
-center_lon = (LON_MIN + LON_MAX) / 2
+# Load the generated CSV data for the plots
+df_users_anim = pd.read_csv("user_hourly_states.csv") if os.path.exists("user_hourly_states.csv") else pd.DataFrame()
+df_summary = pd.read_csv("system_summary_table.csv") if os.path.exists("system_summary_table.csv") else pd.DataFrame()
 
 with tab1:
-    st.subheader("Network Coverage: Terrestrial vs LEO Hexagonal Cells")
-    fig1 = go.Figure()
+    st.subheader("Hybrid Network Traffic Routing Animation")
+    st.markdown("This map dynamically renders the output of the full physics pipeline, including 5G Admission Control and LEO Spot Beam steering.")
     
-    # Black border for light map
-    fig1.add_trace(go.Scattermap(lat=by, lon=bx, mode='lines', line=dict(color='black', width=1.0), name='Ontario Boundary', hoverinfo='skip'))
-    
-    hx, hy = get_hex_grid_coords(hex_radius=0.6)
-    fig1.add_trace(go.Scattermap(lat=hy, lon=hx, mode='lines', line=dict(color='magenta', width=1.5), opacity=0.4, name=f'LEO Hexagons (H3 Res {H3_RESOLUTION})', hoverinfo='skip'))
-
-    tn_users_plot = np.array([[u.history_lat[0], u.history_lon[0]] for u in users if u.coverage_type == "TN"])
-    leo_users_plot = np.array([[u.history_lat[0], u.history_lon[0]] for u in users if u.coverage_type == "LEO"])
-
-    if len(leo_users_plot) > 0:
-        fig1.add_trace(go.Scattermap(lat=leo_users_plot[:, 0], lon=leo_users_plot[:, 1], mode='markers', marker=dict(color='green', size=4, opacity=0.7), name='LEO Users'))
-    if len(tn_users_plot) > 0:
-        fig1.add_trace(go.Scattermap(lat=tn_users_plot[:, 0], lon=tn_users_plot[:, 1], mode='markers', marker=dict(color='blue', size=4, opacity=0.4), name='TN Users'))
-
-    if len(valid_tn_towers) > 0:
-        fig1.add_trace(go.Scattermap(lat=valid_tn_towers[:, 0], lon=valid_tn_towers[:, 1], mode='markers', marker=dict(color='red', size=10, opacity=0.9), name='Active TN Towers'))
-
-    # Black text with a semi-transparent white background
-    fig1.add_trace(go.Scattermap(lat=[c[0] for c in city_centers], lon=[c[1] for c in city_centers], mode='text', text=city_names, textposition='bottom right', textfont=dict(color='black', size=13), name='Cities', hoverinfo='skip'))
-
-    fig1.update_layout(
-        map=dict(style="carto-positron", center=dict(lat=center_lat, lon=center_lon), zoom=4.5),
-        margin=dict(l=0, r=0, t=30, b=0),
-        height=700,
-        paper_bgcolor="white"
-    )
-    st.plotly_chart(fig1, width="stretch")
+    if os.path.exists(html_filename):
+        with open(html_filename, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        components.html(html_content, height=800, scrolling=False)
+    else:
+        st.error("Visualization file was not generated.")
 
 with tab2:
     st.subheader("STEPS Human Mobility")
-    colA, colB = st.columns(2)
+    st.markdown("Visualizing the Power-Law and Zipf's Law distribution of our simulated users.")
     
-    with colA:
-        fig2A = go.Figure()
-        fig2A.add_trace(go.Scattermap(lat=by, lon=bx, mode='lines', line=dict(color='black', width=1.0), showlegend=False, hoverinfo='skip'))
-        
-        tracked_users = random.sample(users, 8)
-        plot_colors = ['orange', 'purple', 'cyan', 'magenta', 'yellow', 'brown', 'pink', 'green']
-        
-        for idx, u in enumerate(tracked_users):
-            fig2A.add_trace(go.Scattermap(lat=u.history_lat, lon=u.history_lon, mode='lines+markers', line=dict(color=plot_colors[idx]), marker=dict(size=5), name=f"User {u.user_id}"))
-            
-        fig2A.add_trace(go.Scattermap(lat=[c[0] for c in city_centers], lon=[c[1] for c in city_centers], mode='text', text=city_names, textposition='bottom right', textfont=dict(color='black', size=11), showlegend=False, hoverinfo='skip'))
-        
-        fig2A.update_layout(title="User Trajectories Over Time", map=dict(style="carto-positron", center=dict(lat=center_lat, lon=center_lon), zoom=4.2), height=550, margin=dict(l=0, r=0, t=40, b=0), paper_bgcolor="white")
-        st.plotly_chart(fig2A, width="stretch")
+    if not df_users_anim.empty:
+        # Get map boundaries for plotting
+        bx, by = get_boundary_coords(ONTARIO_GEOM)
+        center_lat, center_lon = (LAT_MIN + LAT_MAX) / 2, (LON_MIN + LON_MAX) / 2
 
-    with colB:
-        fig2B = go.Figure()
-        fig2B.add_trace(go.Scattermap(lat=by, lon=bx, mode='lines', line=dict(color='black', width=1.0), showlegend=False, hoverinfo='skip'))
+        colA, colB = st.columns(2)
         
-        all_lats, all_lons = [], []
-        for u in users:
-            all_lats.extend(u.history_lat)
-            all_lons.extend(u.history_lon)
+        with colA:
+            fig2A = go.Figure()
+            # Draw Ontario Boundary
+            fig2A.add_trace(go.Scattermap(lat=by, lon=bx, mode='lines', line=dict(color='white', width=1.0), showlegend=False, hoverinfo='skip'))
             
-        # Changed the density points back to black
-        fig2B.add_trace(go.Scattermap(lat=all_lats, lon=all_lons, mode='markers', marker=dict(color='black', size=3, opacity=0.03), showlegend=False))
-        fig2B.add_trace(go.Scattermap(lat=[c[0] for c in city_centers], lon=[c[1] for c in city_centers], mode='text', text=city_names, textposition='bottom right', textfont=dict(color='black', size=11), showlegend=False, hoverinfo='skip'))
-        
-        fig2B.update_layout(title="Spatial Attractor Density", map=dict(style="carto-positron", center=dict(lat=center_lat, lon=center_lon), zoom=4.2), height=550, margin=dict(l=0, r=0, t=40, b=0), paper_bgcolor="white")
-        st.plotly_chart(fig2B, width="stretch")
+            # Pick 8 random users to track their trajectories
+            unique_users = df_users_anim['User_ID'].unique()
+            tracked_users = random.sample(list(unique_users), min(8, len(unique_users)))
+            plot_colors = ['orange', 'purple', 'cyan', 'magenta', 'yellow', 'brown', 'pink', 'lightgreen']
+            
+            for idx, uid in enumerate(tracked_users):
+                user_path = df_users_anim[df_users_anim['User_ID'] == uid]
+                fig2A.add_trace(go.Scattermap(
+                    lat=user_path['Lat'], lon=user_path['Lon'], mode='lines+markers', 
+                    line=dict(color=plot_colors[idx]), marker=dict(size=5), name=f"User {uid}"
+                ))
+            
+            fig2A.update_layout(title="User Trajectories Over Time", map=dict(style="carto-darkmatter", center=dict(lat=center_lat, lon=center_lon), zoom=4.2), height=550, margin=dict(l=0, r=0, t=40, b=0), paper_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig2A, width="stretch")
+
+        with colB:
+            fig2B = go.Figure()
+            # Draw Ontario Boundary
+            fig2B.add_trace(go.Scattermap(lat=by, lon=bx, mode='lines', line=dict(color='white', width=1.0), showlegend=False, hoverinfo='skip'))
+            
+            # Scatter all historical steps to show Attractor Density
+            fig2B.add_trace(go.Scattermap(
+                lat=df_users_anim['Lat'], lon=df_users_anim['Lon'], mode='markers', 
+                marker=dict(color='cyan', size=3, opacity=0.03), showlegend=False
+            ))
+            
+            fig2B.update_layout(title="Spatial Attractor Density", map=dict(style="carto-darkmatter", center=dict(lat=center_lat, lon=center_lon), zoom=4.2), height=550, margin=dict(l=0, r=0, t=40, b=0), paper_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig2B, width="stretch")
 
 with tab3:
     st.subheader("24-Hour Network Traffic Profile")
-    st.markdown("Visualizing the continuous Multi-Gaussian diurnal traffic wave.")
+    st.markdown("Visualizing the continuous Multi-Gaussian diurnal traffic wave against infrastructure limits.")
     
-    # Plotly Line Chart for Traffic (Light Mode)
-    fig3 = go.Figure()
-    
-    # Total Demand (Dark Blue)
-    fig3.add_trace(go.Scatter(x=df_summary['Time Step'], y=df_summary['demand_mbps'], mode='lines', name='Total Demand (Mbps)', line=dict(color='#000080', width=3)))
-    # TN Served (Standard Blue)
-    fig3.add_trace(go.Scatter(x=df_summary['Time Step'], y=df_summary['served_tn_mbps'], mode='lines', name='Served by TN', line=dict(color='#1E90FF', width=2, dash='dash')))
-    # LEO Overflow (Red/Magenta)
-    fig3.add_trace(go.Scatter(x=df_summary['Time Step'], y=df_summary['served_ntn_mbps'], mode='lines', name='Overflow to LEO', line=dict(color='#D2042D', width=2, dash='dot')))
-    
-    fig3.update_layout(
-        xaxis_title="Time of Day", 
-        yaxis_title="Data Load (Mbps)", 
-        template="plotly_white",  # Changed to clean white background
-        paper_bgcolor="white",
-        plot_bgcolor="white",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-    
-    fig3.update_xaxes(tickformat="%H:%M", showgrid=True, gridcolor='lightgrey')
-    fig3.update_yaxes(showgrid=True, gridcolor='lightgrey')
-    
-    st.plotly_chart(fig3, width="stretch")
+    if not df_summary.empty:
+        fig3 = go.Figure()
+        
+        # We calculate a continuous hour that doesn't wrap back to 0
+        df_summary['Continuous_Hour'] = df_summary['Time_s'] / 3600.0
+        
+        # Plotly Line Chart mapped to the continuous time
+        fig3.add_trace(go.Scatter(x=df_summary['Continuous_Hour'], y=df_summary['Total_Demand_Mbps'], mode='lines', name='Total Demand (Mbps)', line=dict(color='cyan', width=3)))
+        fig3.add_trace(go.Scatter(x=df_summary['Continuous_Hour'], y=df_summary['Served_TN_Mbps'], mode='lines', name='Served by TN (5G)', line=dict(color='deepskyblue', width=2, dash='dash')))
+        fig3.add_trace(go.Scatter(x=df_summary['Continuous_Hour'], y=df_summary['Served_NTN_Mbps'], mode='lines', name='Served by LEO (Sat)', line=dict(color='magenta', width=2, dash='dot')))
+        fig3.add_trace(go.Scatter(x=df_summary['Continuous_Hour'], y=df_summary['Dropped_Traffic_Mbps'], mode='lines', name='Dropped Traffic (Outage)', line=dict(color='red', width=2)))
+        
+        
+        fig3.update_layout(
+            xaxis_title="Time of Day (Hours)", 
+            yaxis_title="Data Load (Mbps)", 
+            template="plotly_white",  # Forces black text and dark gridlines
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        
+        fig3.update_xaxes(tickvals=list(range(0, 25, 2)), gridcolor='lightgray')
+        fig3.update_yaxes(gridcolor='lightgray')
+        
+        st.plotly_chart(fig3, width="stretch")
 
 with tab4:
     st.subheader("Data Exports")
@@ -381,12 +361,15 @@ with tab4:
     
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown("**1. User Movement & Demand Data**")
-        st.dataframe(df_users, width="stretch")
-        csv1 = df_users.to_csv(index=False).encode('utf-8')
-        st.download_button("Download simulated_users.csv", data=csv1, file_name="simulated_users_data_with_STEPS.csv", mime="text/csv")
+        st.markdown("**1. User Movement and Demand Data**")
+        if not df_users_anim.empty:
+            st.dataframe(df_users_anim, width="stretch")
+            csv1 = df_users_anim.to_csv(index=False).encode('utf-8')
+            st.download_button("Download user_hourly_states.csv", data=csv1, file_name="user_hourly_states.csv", mime="text/csv")
+                
     with col2:
-        st.markdown("**2. 30-Min System Summary**")
-        st.dataframe(df_summary, width="stretch")
-        csv2 = df_summary.to_csv(index=False).encode('utf-8')
-        st.download_button("Download system_summary.csv", data=csv2, file_name="system_summary_table.csv", mime="text/csv")
+        st.markdown("**2. System Summary & Capacity Metrics**")
+        if not df_summary.empty:
+            st.dataframe(df_summary, width="stretch")
+            csv2 = df_summary.to_csv(index=False).encode('utf-8')
+            st.download_button("Download system_summary.csv", data=csv2, file_name="system_summary_table.csv", mime="text/csv")
