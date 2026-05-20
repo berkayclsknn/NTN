@@ -345,13 +345,16 @@ with tab3:
         fig3.update_layout(
             xaxis_title="Time of Day (Hours)", 
             yaxis_title="Data Load (Mbps)", 
-            template="plotly_white",  # Forces black text and dark gridlines
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            template="plotly_white",  
+            paper_bgcolor="rgba(0,0,0,0)", 
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color='black'),        # <--- FIX: Forces all text/numbers to be crisp black!
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
         
-        fig3.update_xaxes(tickvals=list(range(0, 25, 2)), gridcolor='lightgray')
-        fig3.update_yaxes(gridcolor='lightgray')
+        # Force the gridlines to be a slightly darker grey so they are visible
+        fig3.update_xaxes(tickvals=list(range(0, 25, 2)), gridcolor='rgba(0, 0, 0, 0.1)')
+        fig3.update_yaxes(gridcolor='rgba(0, 0, 0, 0.1)')
         
         st.plotly_chart(fig3, width="stretch")
 

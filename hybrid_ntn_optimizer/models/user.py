@@ -33,13 +33,29 @@ class User:
     def set_resolution(self, resolution: int):
         self.current_h3_id = h3.latlng_to_cell(self.current_lat, self.current_lon, resolution)
 
-    def get_demand_at_time(self, hour: float) -> float:
-        base_traffic = self.diurnal_cfg.get('base_traffic_multiplier', 0.2)
-        n_cfg = self.diurnal_cfg.get('noon_peak', {})
-        noon_peak = n_cfg.get('height_multiplier', 0.5) * np.exp(-((hour - n_cfg.get('center_hour', 12.0))**2) / (2 * (n_cfg.get('width_hours', 3.0)**2)))
+    def get_demand_at_time(self, hour: float) -> float: 
+        """
+        Calculates demand using the Sinusoid Superposition Model.
+        Reference: Wang et al. (2015), Eq. 3
+        """
+        # 1. Get the slider value from your Streamlit GUI configuration
         e_cfg = self.diurnal_cfg.get('evening_peak', {})
-        evening_peak = e_cfg.get('height_multiplier', 1.0) * np.exp(-((hour - e_cfg.get('center_hour', 20.0))**2) / (2 * (e_cfg.get('width_hours', 2.5)**2)))
-        return self.base_demand_mbps * (base_traffic + noon_peak + evening_peak)
+        evening_peak_hr = e_cfg.get('center_hour', 20.0)
+        
+        # 2. Shift the time so your GUI slider still moves the peak!
+        t = hour - evening_peak_hr + 20.0 
+        
+        # 3. Equation 3 from Wang et al. (2015)
+        # Scaled to act as a multiplier (average traffic = 1.0x)
+        a0 = 1.0
+        wave1 = 0.51 * np.sin((np.pi / 12) * t + 3.08)
+        wave2 = 0.30 * np.sin((np.pi / 6) * t + 2.08)
+        wave3 = 0.09 * np.sin((np.pi / 4) * t + 1.13)
+        
+        # Ensure the multiplier never drops below a 0.1 baseline (background data)
+        diurnal_multiplier = max(0.1, a0 + wave1 + wave2 + wave3)
+        
+        return self.base_demand_mbps * diurnal_multiplier
 
     def move(self, hour: float, resolution: int):
         start = self.mobility_cfg.get('night_hours_start', 22)
