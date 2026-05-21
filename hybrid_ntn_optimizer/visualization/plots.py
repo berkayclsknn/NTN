@@ -47,7 +47,7 @@ def build_bs_coverage_geojson(base_stations):
     return {"type": "FeatureCollection", "features": features}
 """
 def plot_master_hybrid_animation(region, users, base_stations, beam_data, duration_s, time_step_s, filename="hybrid_master_map.html"):
-    print(f"\n Rendering Master Interactive Visualization...")
+    print(f"\n🎨 Rendering Master Interactive Visualization...")
     
     hex_geojson = build_h3_geojson(region.cells)
     bs_coverage_geojson = build_bs_coverage_geojson(base_stations)
@@ -148,7 +148,7 @@ def plot_master_hybrid_animation(region, users, base_stations, beam_data, durati
 """
 
 def plot_master_hybrid_animation_OLD(region, users, base_stations, beam_data, user_data, duration_s, time_step_s, filename="Final_Animation.html"):
-    print(f"\n Rendering Unified Visualization (This may take a moment to compile...)")
+    print(f"\n🎨 Rendering Unified Visualization (This may take a moment to compile...)")
     
     hex_geojson = build_h3_geojson(region.cells)
     bs_coverage_geojson = build_bs_coverage_geojson(base_stations)
@@ -256,12 +256,12 @@ def plot_master_hybrid_animation_OLD(region, users, base_stations, beam_data, us
     )
     
     fig.write_html(filename)
-    print(f" Master Visualization saved to {filename}")
+    print(f"✅ Master Visualization saved to {filename}")
 
 
 
 def plot_master_hybrid_animation(region, users, base_stations, beam_data, user_data, duration_s, time_step_s, filename="Final_Animation.html"):
-    print(f"\n Rendering Unified God-Mode Visualization (Compiling frames...)")
+    print(f"\n🎨 Rendering Unified God-Mode Visualization (Compiling frames...)")
     
     hex_geojson = build_h3_geojson(region.cells)
     bs_coverage_geojson = build_bs_coverage_geojson(base_stations)
@@ -295,7 +295,6 @@ def plot_master_hybrid_animation(region, users, base_stations, beam_data, user_d
     ]
     
     initial_users = [u for u in user_data if u["Hour"] == "Hour 0.0"]
-    
     for state_id, color, label in user_states:
         state_users = [u for u in initial_users if u["State"] == state_id]
         fig.add_trace(go.Scattermapbox(
@@ -367,6 +366,7 @@ def plot_master_hybrid_animation(region, users, base_stations, beam_data, user_d
     
     # Layer 2: In-memory Ontario Administrative Borders
     if hasattr(region, 'geojson_geometry') and region.geojson_geometry:        
+        # FIX: Check if it's a Hydra DictConfig container, and convert it to a raw Python dict!
         raw_geometry = region.geojson_geometry
         if isinstance(raw_geometry, DictConfig):
             raw_geometry = OmegaConf.to_container(raw_geometry, resolve=True)
@@ -377,18 +377,14 @@ def plot_master_hybrid_animation(region, users, base_stations, beam_data, user_d
             line=dict(width=2)
         ))
     else:
-        print(" Warning: region.geojson_geometry missing or unreadable. Boundary lines omitted.")
+        print("⚠️ Warning: region.geojson_geometry missing or unreadable. Boundary lines omitted.")
 
     fig.update_layout(
         title="Hybrid NTN-TN Real-Time Traffic Routing (System Level Engine)",
-        template="plotly_dark",                       # <--- FIX 1: Forces Dark Mode text/slider
-        height=800,                                   # <--- FIX 2: Stretches the map vertically
-        paper_bgcolor="rgba(0,0,0,0)",                # <--- FIX 3: Makes the outer background transparent
-        plot_bgcolor="rgba(0,0,0,0)",                 # <--- FIX 4: Makes the inner background transparent
         mapbox=dict(
             style="carto-darkmatter",
             center={"lat": 46.0, "lon": -80.0}, zoom=4.5,
-            layers=mapbox_layers                      # Keeps your team's new map layers!
+            layers=mapbox_layers
         ),
         margin={"r":0,"t":50,"l":0,"b":0},
         updatemenus=[{
@@ -402,4 +398,4 @@ def plot_master_hybrid_animation(region, users, base_stations, beam_data, user_d
     )
     
     fig.write_html(filename)
-    print(f" Master Visualization compiled successfully and saved to {filename}")
+    print(f"✅ Master Visualization compiled successfully and saved to {filename}")
