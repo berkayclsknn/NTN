@@ -37,8 +37,16 @@ TOTAL_USERS = st.sidebar.slider("Total Simulated Users", min_value=0, max_value=
 CITY_RATIO = st.sidebar.slider("City vs Rural Ratio", min_value=0.1, max_value=0.9, value=0.7, step=0.1)
 
 st.sidebar.subheader("2. Infrastructure Settings")
-TN_POP_THRESHOLD = st.sidebar.slider("Tower Threshold (Min Users)", min_value=10, max_value=100, value=50, step=5)
-USERS_PER_CLUSTER = st.sidebar.slider("Target Users per Tower (K-Means)", min_value=5, max_value=100, value=20, step=5)
+TN_POP_THRESHOLD = st.sidebar.slider(
+    "Urban Discovery Threshold", 
+    min_value=2, max_value=50, value=5, 
+    help="DBSCAN: Minimum users needed to identify an area as an 'Urban Zone' for 5G."
+)
+USERS_PER_CLUSTER = st.sidebar.slider(
+    "Target Users per Tower", 
+    min_value=5, max_value=100, value=20, 
+    help="K-Means: How many users should share one tower? Lower = more towers (better capacity)."
+)
 TN_BS_CAPACITY_GBPS = st.sidebar.slider("TN Tower Capacity (Gbps)", min_value=1, max_value=50, value=10, step=1)
 TN_BS_CAPACITY_MBPS = TN_BS_CAPACITY_GBPS * 1000
 TN_BW_MHZ = st.sidebar.slider("BS Bandwidth (MHz)", min_value=10, max_value=400, value=100, step=10)
@@ -248,8 +256,8 @@ cfg = OmegaConf.create({
     },
 "terrestrial": {
         "density_threshold": TN_POP_THRESHOLD,
+        "users_per_cluster_ratio": USERS_PER_CLUSTER, 
         "bs_capacity_mbps": float(TN_BS_CAPACITY_MBPS),
-        "users_per_cluster_ratio": USERS_PER_CLUSTER,
         "p_tx_dbm": TN_P_TX,
         "g_tx_dbi": TN_G_TX,
         "g_rx_ue_dbi": TN_G_RX,
@@ -294,7 +302,7 @@ with st.spinner("Deploying LEO Satellite Constellation & SGP4 Propagators..."):
 with st.spinner("Spawning Heterogeneous User Population..."):
     users = generate_users(cfg, active_region)
 
-with st.spinner("Executing K-Means for Terrestrial Infrastructure..."):
+with st.spinner("Executing Urban Discovery (DBSCAN) & Densification (K-Means)..."):
     towers = generate_terrestrial_network(cfg, users, active_region.h3_resolution)
 
 with st.spinner("Running Master RF Simulation Loop (Link Budgets & Admission Control)..."):
