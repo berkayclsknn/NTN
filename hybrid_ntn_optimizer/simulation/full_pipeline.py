@@ -33,7 +33,6 @@ def run_daily_mobility_simulation(cfg: DictConfig, users: List[User], base_stati
     beam_animation_data = []
     user_animation_data = []
     detailed_drop_log = [] # <--- NEW: Diagnostic drop tracker initialized
-    network_usage_data = []
     
     p_tx_dbm = cfg.terrestrial.get("p_tx_dbm", 43.0)
     g_tx_dbi = cfg.terrestrial.get("g_tx_dbi", 15.0)
@@ -160,19 +159,6 @@ def run_daily_mobility_simulation(cfg: DictConfig, users: List[User], base_stati
                 total_served_tn += u.served_mbps
                 u.historical_avg_mbps = (0.8 * getattr(u, 'historical_avg_mbps', 0.1)) + (0.2 * u.served_mbps)
 
-        for bs in base_stations:
-            utilization = 100.0 * (1.0 - (bs.remaining_bandwidth_hz / bs.total_bandwidth_hz))
-            network_usage_data.append({
-                "Time_s": t_s,
-                "Hour": f"Hour {hour_of_day:.1f}",
-                "Network_Type": "5G_TN",
-                "Node_ID": f"Tower_{bs.bs_id}",
-                "Total_MHz": bs.total_bandwidth_hz / 1e6,
-                "Remaining_MHz": bs.remaining_bandwidth_hz / 1e6,
-                "Utilization_%": round(utilization, 2),
-                "Active_Users": bs.active_users
-            })
-
         # ==================================================
         # PHASE 3: SPILLOVER LEDGER BINDING
         # ==================================================
@@ -210,31 +196,6 @@ def run_daily_mobility_simulation(cfg: DictConfig, users: List[User], base_stati
                 elif entry["unmet_mbps"] > 0.1 and entry["user"].coverage_type != "TN":
                     entry["user"].coverage_type = "DROPPED"
         #print(user_animation_data)
-
-        max_spot_beams = cfg.constellation.get("max_spot_beams", 15)
-        bw_ntn = cfg.constellation.get("bandwidth_hz", 40e6)
-        total_sat_mhz = (max_spot_beams * bw_ntn) / 1e6
-
-        sat_stats = {}
-        for beam in active_beams:
-            if beam.satellite_id not in sat_stats:
-                sat_stats[beam.satellite_id] = {"beams_used": 0, "users": 0}
-            sat_stats[beam.satellite_id]["beams_used"] += 1
-            sat_stats[beam.satellite_id]["users"] += beam.active_users
-            
-        for sat_id, stats in sat_stats.items():
-            used_mhz = (stats["beams_used"] * bw_ntn) / 1e6 
-            network_usage_data.append({
-                "Time_s": t_s,
-                "Hour": f"Hour {hour_of_day:.1f}",
-                "Network_Type": "LEO_NTN",
-                "Node_ID": f"Sat_{sat_id}",
-                "Total_MHz": total_sat_mhz,
-                "Remaining_MHz": total_sat_mhz - used_mhz,
-                "Utilization_%": round(100.0 * (used_mhz / total_sat_mhz), 2),
-                "Active_Users": stats["users"]
-            })
-
         for u in users:
             user_animation_data.append({
                 "Hour": f"Hour {absolute_hour:.1f}",  # "Hour 0.0", "Hour 24.0", "Hour 48.0" — always unique
@@ -282,7 +243,6 @@ def run_daily_mobility_simulation(cfg: DictConfig, users: List[User], base_stati
     pd.DataFrame(user_animation_data).to_csv("user_hourly_states.csv", index=False)
     pd.DataFrame(detailed_drop_log).to_csv("detailed_drop_log.csv", index=False) # NEW: Generate the CSV
     pd.DataFrame(summary_data).to_csv("system_summary_table.csv", index=False)
-    pd.DataFrame(network_usage_data).to_csv("network_usage_data.csv", index=False)
 
     print("\n✅ Simulation Complete. Generated all export files.")
     return beam_animation_data, user_animation_data

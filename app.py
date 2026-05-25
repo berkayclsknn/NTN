@@ -1,3 +1,5 @@
+from asyncio import sleep
+
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -5,10 +7,101 @@ import plotly.graph_objects as go
 import os
 import yaml
 import random
+from pathlib import Path
 import streamlit.components.v1 as components
 from omegaconf import OmegaConf, DictConfig
-from shapely.geometry import shape
+from shapely.geometry import shape, mapping
 import plotly.express as px
+
+# ==========================================
+# CONFIGURATION FILE LOADING
+# ==========================================
+CONFIG_DIR = Path(__file__).resolve().parent / "configs"
+
+
+def _load_cfg(path: Path) -> DictConfig:
+    """Load a required OmegaConf YAML file."""
+    if not path.exists():
+        raise FileNotFoundError(f"Missing configuration file: {path}")
+    return OmegaConf.load(path)
+
+
+def _to_float(value, default: float = 0.0) -> float:
+    """Convert YAML numeric values safely, including strings like '3.5e9'."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _to_int(value, default: int = 0) -> int:
+    """Convert YAML numeric values safely to int."""
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _clamp(value, min_value, max_value):
+    """Keep Streamlit slider defaults inside the allowed range."""
+    return max(min_value, min(max_value, value))
+
+
+# Load YAML defaults once at app startup. Streamlit reruns this script when widgets change.
+base_cfg_defaults = _load_cfg(CONFIG_DIR / "base.yaml")
+constellation_cfg_defaults = _load_cfg(CONFIG_DIR / "constellation.yaml")
+scenario_yaml_cfg = _load_cfg(CONFIG_DIR / "scenario" / "ontario_full.yaml")
+population_yaml_cfg = _load_cfg(CONFIG_DIR / "population" / "ontario_demographics.yaml")
+terrestrial_yaml_cfg = _load_cfg(CONFIG_DIR / "terrestrial" / "5g_base.yaml")
+cost_yaml_cfg = _load_cfg(CONFIG_DIR / "cost.yaml")
+mobility_yaml_cfg = _load_cfg(CONFIG_DIR / "mobility.yaml")
+optimization_yaml_cfg = _load_cfg(CONFIG_DIR / "optimization.yaml")
+
+# Convert scenario config to a plain dict for Shapely/Plotly.
+ontario_yaml = OmegaConf.to_container(scenario_yaml_cfg, resolve=True)
+
+# Fix invalid geometries defensively. This keeps tessellation and boundary plotting more stable.
+ONTARIO_GEOM = shape(ontario_yaml["geojson_geometry"])
+if not ONTARIO_GEOM.is_valid:
+    ONTARIO_GEOM = ONTARIO_GEOM.buffer(0)
+    ontario_yaml["geojson_geometry"] = mapping(ONTARIO_GEOM)
+
+# Defaults for Streamlit widgets, taken from YAML files.
+DEFAULT_TOTAL_CITY_USERS = _to_int(population_yaml_cfg.total_city_users, 700)
+DEFAULT_TOTAL_RURAL_USERS = _to_int(population_yaml_cfg.total_rural_users, 300)
+DEFAULT_TOTAL_USERS = DEFAULT_TOTAL_CITY_USERS + DEFAULT_TOTAL_RURAL_USERS
+DEFAULT_CITY_RATIO = (
+    DEFAULT_TOTAL_CITY_USERS / DEFAULT_TOTAL_USERS
+    if DEFAULT_TOTAL_USERS > 0
+    else 0.7
+)
+DEFAULT_CITY_RATIO = round(_clamp(DEFAULT_CITY_RATIO, 0.1, 0.9), 1)
+
+DEFAULT_TN_POP_THRESHOLD = _clamp(_to_int(terrestrial_yaml_cfg.density_threshold, 5), 2, 50)
+DEFAULT_USERS_PER_CLUSTER = _clamp(_to_int(terrestrial_yaml_cfg.users_per_cluster_ratio, 10), 5, 100)
+DEFAULT_TN_BS_CAPACITY_GBPS = _clamp(_to_int(_to_float(terrestrial_yaml_cfg.bs_capacity_mbps, 10000.0) / 1000.0, 10), 1, 50)
+DEFAULT_TN_BW_MHZ = _clamp(_to_int(_to_float(terrestrial_yaml_cfg.bandwidth_hz, 100e6) / 1e6, 100), 10, 400)
+
+DEFAULT_TN_COVERAGE_RADIUS = float(_clamp(_to_float(terrestrial_yaml_cfg.coverage_radius_km, 10.0), 1.0, 50.0))
+DEFAULT_TN_P_TX = float(_clamp(_to_float(terrestrial_yaml_cfg.p_tx_dbm, 43.0), 20.0, 60.0))
+DEFAULT_TN_G_TX = float(_clamp(_to_float(terrestrial_yaml_cfg.g_tx_dbi, 15.0), 0.0, 30.0))
+DEFAULT_TN_G_RX = float(_clamp(_to_float(terrestrial_yaml_cfg.g_rx_ue_dbi, 0.0), -10.0, 10.0))
+DEFAULT_TN_FREQ_GHZ = float(_clamp(_to_float(terrestrial_yaml_cfg.carrier_freq_hz, 3.5e9) / 1e9, 0.5, 6.0))
+DEFAULT_TN_SINR_MIN = float(_clamp(_to_float(terrestrial_yaml_cfg.sinr_min_db, -3.0), -10.0, 10.0))
+DEFAULT_TN_SHADOWING = float(_clamp(_to_float(terrestrial_yaml_cfg.shadowing_std_dev_db, 8.0), 0.0, 20.0))
+DEFAULT_TN_BODY_LOSS = float(_clamp(_to_float(terrestrial_yaml_cfg.body_loss_db, 3.0), 0.0, 15.0))
+
+DEFAULT_SAT_ALTITUDE = float(_clamp(_to_float(constellation_cfg_defaults.constellation.altitude_km, 550.0), 300.0, 1500.0))
+DEFAULT_TOTAL_SATS = _to_int(constellation_cfg_defaults.constellation.total_satellites, 1584)
+if DEFAULT_TOTAL_SATS not in [72, 324, 648, 1584, 4000]:
+    DEFAULT_TOTAL_SATS = 1584
+DEFAULT_NTN_BW_MHZ = _clamp(_to_int(_to_float(constellation_cfg_defaults.constellation.bandwidth_hz, 300e6) / 1e6, 300), 10, 1000)
+DEFAULT_SAT_EIRP = float(_clamp(_to_float(constellation_cfg_defaults.constellation.eirp_dbw, 50.0), 20.0, 60.0))
+
+DEFAULT_EVENING_PEAK_HOUR = float(_clamp(_to_float(population_yaml_cfg.traffic.diurnal_curve.evening_peak.center_hour, 20.0), 16.0, 23.0))
+DEFAULT_SIM_DURATION = _clamp(_to_int(base_cfg_defaults.simulation.duration_s, 86400), 3600, 86400)
+DEFAULT_TIME_STEP = _clamp(_to_int(base_cfg_defaults.simulation.time_step_s, 3600), 600, 3600)
+
 
 # Import the team's new modular architecture
 from hybrid_ntn_optimizer.models.scenario import Region
@@ -33,44 +126,150 @@ st.markdown("A spatio-temporal simulation engine for 5G heterogeneous networks."
 st.sidebar.header("Simulation Parameters")
 
 st.sidebar.subheader("1. Population Settings")
-TOTAL_USERS = st.sidebar.slider("Total Simulated Users", min_value=0, max_value=5000, value=1000, step=500)
-CITY_RATIO = st.sidebar.slider("City vs Rural Ratio", min_value=0.1, max_value=0.9, value=0.7, step=0.1)
+TOTAL_USERS = st.sidebar.slider(
+    "Total Simulated Users",
+    min_value=0,
+    max_value=5000,
+    value=DEFAULT_TOTAL_USERS,
+    step=500,
+)
+CITY_RATIO = st.sidebar.slider(
+    "City vs Rural Ratio",
+    min_value=0.1,
+    max_value=0.9,
+    value=DEFAULT_CITY_RATIO,
+    step=0.1,
+)
 
 st.sidebar.subheader("2. Infrastructure Settings")
 TN_POP_THRESHOLD = st.sidebar.slider(
-    "Urban Discovery Threshold", 
-    min_value=2, max_value=50, value=5, 
-    help="DBSCAN: Minimum users needed to identify an area as an 'Urban Zone' for 5G."
+    "Urban Discovery Threshold",
+    min_value=2,
+    max_value=50,
+    value=DEFAULT_TN_POP_THRESHOLD,
+    step=1,
+    help="DBSCAN: Minimum users needed to identify an area as an 'Urban Zone' for 5G.",
 )
 USERS_PER_CLUSTER = st.sidebar.slider(
-    "Target Users per Tower", 
-    min_value=5, max_value=100, value=20, 
-    help="K-Means: How many users should share one tower? Lower = more towers (better capacity)."
+    "Target Users per Tower",
+    min_value=5,
+    max_value=100,
+    value=DEFAULT_USERS_PER_CLUSTER,
+    step=5,
+    help="K-Means: How many users should share one tower? Lower = more towers (better capacity).",
 )
-TN_BS_CAPACITY_GBPS = st.sidebar.slider("TN Tower Capacity (Gbps)", min_value=1, max_value=50, value=10, step=1)
+TN_BS_CAPACITY_GBPS = st.sidebar.slider(
+    "TN Tower Capacity (Gbps)",
+    min_value=1,
+    max_value=50,
+    value=DEFAULT_TN_BS_CAPACITY_GBPS,
+    step=1,
+)
 TN_BS_CAPACITY_MBPS = TN_BS_CAPACITY_GBPS * 1000
-TN_BW_MHZ = st.sidebar.slider("BS Bandwidth (MHz)", min_value=10, max_value=400, value=100, step=10)
+TN_BW_MHZ = st.sidebar.slider(
+    "BS Bandwidth (MHz)",
+    min_value=10,
+    max_value=400,
+    value=DEFAULT_TN_BW_MHZ,
+    step=10,
+)
 
 # --- Advanced 5G RF Parameters Dropdown ---
 with st.sidebar.expander("Advanced 5G RF Parameters"):
-    TN_COVERAGE_RADIUS = st.slider("Coverage Radius (km)", min_value=1.0, max_value=50.0, value=10.0, step=1.0)
-    TN_P_TX = st.slider("BS Transmit Power (dBm)", min_value=20.0, max_value=60.0, value=43.0, step=1.0)
-    TN_G_TX = st.slider("BS Antenna Gain (dBi)", min_value=0.0, max_value=30.0, value=15.0, step=1.0)
-    TN_G_RX = st.slider("UE Receive Gain (dBi)", min_value=-10.0, max_value=10.0, value=0.0, step=1.0)
-    # We display GHz/MHz for the user, but will multiply by 1e9/1e6 for the backend code
-    TN_FREQ_GHZ = st.slider("Carrier Frequency (GHz)", min_value=0.5, max_value=6.0, value=3.5, step=0.1)
-    TN_SINR_MIN = st.slider("Min SINR (dB)", min_value=-10.0, max_value=10.0, value=-3.0, step=0.5)
-    TN_SHADOWING = st.slider("Shadowing Std Dev (dB)", min_value=0.0, max_value=20.0, value=8.0, step=0.5)
-    TN_BODY_LOSS = st.slider("Body/Penetration Loss (dB)", min_value=0.0, max_value=15.0, value=3.0, step=0.5)
+    TN_COVERAGE_RADIUS = st.slider(
+        "Coverage Radius (km)",
+        min_value=1.0,
+        max_value=50.0,
+        value=DEFAULT_TN_COVERAGE_RADIUS,
+        step=1.0,
+    )
+    TN_P_TX = st.slider(
+        "BS Transmit Power (dBm)",
+        min_value=20.0,
+        max_value=60.0,
+        value=DEFAULT_TN_P_TX,
+        step=1.0,
+    )
+    TN_G_TX = st.slider(
+        "BS Antenna Gain (dBi)",
+        min_value=0.0,
+        max_value=30.0,
+        value=DEFAULT_TN_G_TX,
+        step=1.0,
+    )
+    TN_G_RX = st.slider(
+        "UE Receive Gain (dBi)",
+        min_value=-10.0,
+        max_value=10.0,
+        value=DEFAULT_TN_G_RX,
+        step=1.0,
+    )
+    # We display GHz/MHz for the user, but multiply by 1e9/1e6 for backend code.
+    TN_FREQ_GHZ = st.slider(
+        "Carrier Frequency (GHz)",
+        min_value=0.5,
+        max_value=6.0,
+        value=DEFAULT_TN_FREQ_GHZ,
+        step=0.1,
+    )
+    TN_SINR_MIN = st.slider(
+        "Min SINR (dB)",
+        min_value=-10.0,
+        max_value=10.0,
+        value=DEFAULT_TN_SINR_MIN,
+        step=0.5,
+    )
+    TN_SHADOWING = st.slider(
+        "Shadowing Std Dev (dB)",
+        min_value=0.0,
+        max_value=20.0,
+        value=DEFAULT_TN_SHADOWING,
+        step=0.5,
+    )
+    TN_BODY_LOSS = st.slider(
+        "Body/Penetration Loss (dB)",
+        min_value=0.0,
+        max_value=15.0,
+        value=DEFAULT_TN_BODY_LOSS,
+        step=0.5,
+    )
 
 st.sidebar.subheader("3. LEO Constellation Settings")
-SAT_ALTITUDE = st.sidebar.slider("Satellite Altitude (km)", min_value=300.0, max_value=1500.0, value=550.0, step=50.0)
-TOTAL_SATS = st.sidebar.select_slider("Total Satellites in Constellation", options=[72, 324, 648, 1584, 4000], value=1584)
-NTN_BW_MHZ = st.sidebar.slider("NTN Beam Bandwidth (MHz)", min_value=10, max_value=100, value=40, step=10)
-SAT_EIRP = st.sidebar.slider("Satellite EIRP (dBW)", min_value=20.0, max_value=60.0, value=50.0, step=1.0)
+SAT_ALTITUDE = st.sidebar.slider(
+    "Satellite Altitude (km)",
+    min_value=300.0,
+    max_value=1500.0,
+    value=DEFAULT_SAT_ALTITUDE,
+    step=50.0,
+)
+TOTAL_SATS = st.sidebar.select_slider(
+    "Total Satellites in Constellation",
+    options=[72, 324, 648, 1584, 4000],
+    value=DEFAULT_TOTAL_SATS,
+)
+NTN_BW_MHZ = st.sidebar.slider(
+    "NTN Beam Bandwidth (MHz)",
+    min_value=10,
+    max_value=1000,
+    value=DEFAULT_NTN_BW_MHZ,
+    step=10,
+)
+SAT_EIRP = st.sidebar.slider(
+    "Satellite EIRP (dBW)",
+    min_value=20.0,
+    max_value=60.0,
+    value=DEFAULT_SAT_EIRP,
+    step=1.0,
+)
 
 st.sidebar.subheader("4. Diurnal Traffic Model")
-EVENING_PEAK_HOUR = st.sidebar.slider("Evening Peak Time (Hour)", min_value=16.0, max_value=23.0, value=20.0, step=0.5)
+EVENING_PEAK_HOUR = st.sidebar.slider(
+    "Evening Peak Time (Hour)",
+    min_value=16.0,
+    max_value=23.0,
+    value=DEFAULT_EVENING_PEAK_HOUR,
+    step=0.5,
+)
 
 st.sidebar.subheader("5. User Traffic Profiles")
 st.sidebar.caption("Check the boxes to include these 3GPP usage scenarios.")
@@ -82,11 +281,22 @@ active_count = sum([use_light, use_medium, use_heavy])
 if active_count == 0:
     st.sidebar.error("Please select at least one user profile to run the simulation.")
     st.stop()
-prob_share = 1.0 / active_count
 
 st.sidebar.subheader("6. Simulation Engine")
-SIM_DURATION = st.sidebar.slider("Simulation Duration (Seconds)", min_value=3600, max_value=86400, value=18000, step=3600)
-TIME_STEP = st.sidebar.slider("Time Step (Seconds)", min_value=600, max_value=3600, value=3600, step=600)
+SIM_DURATION = st.sidebar.slider(
+    "Simulation Duration (Seconds)",
+    min_value=3600,
+    max_value=86400,
+    value=DEFAULT_SIM_DURATION,
+    step=3600,
+)
+TIME_STEP = st.sidebar.slider(
+    "Time Step (Seconds)",
+    min_value=600,
+    max_value=3600,
+    value=DEFAULT_TIME_STEP,
+    step=600,
+)
 
 st.sidebar.markdown("---")
 st.sidebar.info("Note: The dashboard is live. Adjusting any parameter will update the backend simulation automatically.")
@@ -94,14 +304,12 @@ st.sidebar.info("Note: The dashboard is live. Adjusting any parameter will updat
 # ==========================================
 # MAP HELPERS & CUSTOM RENDERER
 # ==========================================
-with open(r"E:\berkay\NTN\configs\scenario\ontario_full.yaml", "r", encoding="utf-8") as f:
-    ontario_yaml = yaml.safe_load(f)
-
-ONTARIO_GEOM = shape(ontario_yaml["geojson_geometry"])
 LON_MIN, LAT_MIN, LON_MAX, LAT_MAX = ONTARIO_GEOM.bounds
 center_lat, center_lon = (LAT_MIN + LAT_MAX) / 2, (LON_MIN + LON_MAX) / 2
-city_centers = [(43.65, -79.38), (45.42, -75.69), (43.25, -79.87), (42.98, -81.25), (44.23, -76.49), (46.49, -81.01)]
-city_names = ['Toronto', 'Ottawa', 'Hamilton', 'London', 'Kingston', 'Sudbury']
+
+# City labels are read from the population YAML so they stay consistent with the config.
+city_names = list(population_yaml_cfg.cities.keys())
+city_centers = [tuple(population_yaml_cfg.cities[name].coords) for name in city_names]
 
 def get_boundary_coords(geom):
     x_all, y_all = [], []
@@ -192,93 +400,168 @@ def render_custom_dashboard_animation(region, users, base_stations, beam_data, u
 # ==========================================
 # DYNAMIC CONFIGURATION BUILDER
 # ==========================================
-cfg = OmegaConf.create({
-    "random_seed": 42,
-    "epoch_utc": "2024-01-01T00:00:00",
+# Important idea:
+# - YAML files define the full baseline model.
+# - Streamlit sidebar values override only the parameters the user changes live.
+# - This prevents app.py from silently ignoring your .yaml files.
+
+base_cfg = OmegaConf.create(OmegaConf.to_container(base_cfg_defaults, resolve=True))
+
+# Remove Hydra-only defaults before passing config to the simulation pipeline.
+if "defaults" in base_cfg:
+    del base_cfg["defaults"]
+
+cfg = OmegaConf.merge(
+    base_cfg,
+    constellation_cfg_defaults,
+    {
+        "scenario": scenario_yaml_cfg,
+        "population": population_yaml_cfg,
+        "terrestrial": terrestrial_yaml_cfg,
+        "cost": cost_yaml_cfg,
+        "mobility": mobility_yaml_cfg,
+        "optimization": optimization_yaml_cfg,
+    },
+)
+
+# Live sidebar overrides.
+dynamic_overrides = OmegaConf.create({
     "scenario": {
-        "name": "Ontario_Province",
-        "h3_resolution": ontario_yaml.get("h3_resolution", 3),
-        "geojson_geometry": ontario_yaml["geojson_geometry"]
+        "name": ontario_yaml.get("name", "Ontario_Province"),
+        "h3_resolution": int(ontario_yaml.get("h3_resolution", 3)),
+        "geojson_geometry": ontario_yaml["geojson_geometry"],
     },
+
     "constellation": {
-        "name": "Live-Simulation-Shell",
-        "total_satellites": TOTAL_SATS,
-        "num_planes": 72 if TOTAL_SATS == 1584 else max(1, int(TOTAL_SATS/18)), 
-        "phasing": 1,
-        "inclination_deg": 53.0,
-        "altitude_km": SAT_ALTITUDE,
-        "eirp_dbw": SAT_EIRP,
-        "g_t_db": -15.5,
-        "min_elevation_deg": 25.0,
-        "apply_j2": True,
-        "max_spot_beams": 32,
-        "beam_radius_nadir_km": 120.0,
-        "max_steering_angle_deg": 45.0,
-        "freq_ghz": 2.2, 
-        "bandwidth_hz": NTN_BW_MHZ * 1000000, 
-        "sinr_min_db": 0.0,
-        "theta_3db_deg": 2.5,
-        "sll_db": 25.0,
-        "weather_loss_db": 1.0
+        "altitude_km": float(SAT_ALTITUDE),
+        "total_satellites": int(TOTAL_SATS),
+        "num_planes": 72 if TOTAL_SATS == 1584 else max(1, int(TOTAL_SATS / 18)),
+        "eirp_dbw": float(SAT_EIRP),
+        "bandwidth_hz": float(NTN_BW_MHZ * 1e6),
     },
+
     "population": {
         "total_city_users": int(TOTAL_USERS * CITY_RATIO),
-        "total_rural_users": TOTAL_USERS - int(TOTAL_USERS * CITY_RATIO),
-        "city_scatter_std_dev": 0.15,
-        "cities": {
-            "Toronto": {"coords": [43.65, -79.38], "weight": 0.70},
-            "Ottawa": {"coords": [45.42, -75.69], "weight": 0.11},
-            "Hamilton": {"coords": [43.25, -79.87], "weight": 0.09},
-            "London": {"coords": [42.98, -81.25], "weight": 0.06},
-            "Kingston": {"coords": [44.23, -76.49], "weight": 0.02},
-            "Sudbury": {"coords": [46.49, -81.01], "weight": 0.02}
-        },
-        "mobility": {
-            "num_attractors": 3,
-            "zipf_alpha": 1.2,
-            "pareto_beta": 1.75,
-            "delta_r0_km": 1.5,
-            "cutoff_kappa_km": 80.0,
-            "night_hours_start": 22,
-            "night_hours_end": 6,
-            "night_move_chance": 0.1,
-            "day_move_chance": 0.4,
-            "gps_wander_std_dev": 0.005
-        },
+        "total_rural_users": int(TOTAL_USERS - int(TOTAL_USERS * CITY_RATIO)),
         "traffic": {
             "diurnal_curve": {
-                "base_traffic_multiplier": 0.2,
-                "noon_peak": {"center_hour": 12.0, "width_hours": 3.0, "height_multiplier": 0.5},
-                "evening_peak": {"center_hour": EVENING_PEAK_HOUR, "width_hours": 2.5, "height_multiplier": 1.0}
-            },
-            "profiles": {} 
-        }
+                "evening_peak": {
+                    "center_hour": float(EVENING_PEAK_HOUR),
+                }
+            }
+        },
     },
-"terrestrial": {
-        "density_threshold": TN_POP_THRESHOLD,
-        "users_per_cluster_ratio": USERS_PER_CLUSTER, 
+
+    "terrestrial": {
+        "density_threshold": int(TN_POP_THRESHOLD),
+        "users_per_cluster_ratio": int(USERS_PER_CLUSTER),
+        "coverage_radius_km": float(TN_COVERAGE_RADIUS),
         "bs_capacity_mbps": float(TN_BS_CAPACITY_MBPS),
-        "p_tx_dbm": TN_P_TX,
-        "g_tx_dbi": TN_G_TX,
-        "g_rx_ue_dbi": TN_G_RX,
-        "carrier_freq_hz": TN_FREQ_GHZ * 1e9,   # Converts GHz slider to Hz
-        "bandwidth_hz": TN_BW_MHZ * 1e6,        # Converts MHz slider to Hz
-        "sinr_min_db": TN_SINR_MIN,
-        "shadowing_std_dev_db": TN_SHADOWING,         
-        "body_loss_db": TN_BODY_LOSS,
-        "use_physical_radius": True,
-        "fixed_coverage_radius_km": True,    
-        "coverage_radius_km": TN_COVERAGE_RADIUS           
+        "p_tx_dbm": float(TN_P_TX),
+        "g_tx_dbi": float(TN_G_TX),
+        "g_rx_ue_dbi": float(TN_G_RX),
+        "carrier_freq_hz": float(TN_FREQ_GHZ * 1e9),
+        "bandwidth_hz": float(TN_BW_MHZ * 1e6),
+        "sinr_min_db": float(TN_SINR_MIN),
+        "shadowing_std_dev_db": float(TN_SHADOWING),
+        "body_loss_db": float(TN_BODY_LOSS),
     },
+
     "simulation": {
-        "duration_s": SIM_DURATION,
-        "time_step_s": TIME_STEP,
-    }
+        "duration_s": int(SIM_DURATION),
+        "time_step_s": int(TIME_STEP),
+    },
 })
 
-if use_light: cfg.population.traffic.profiles.light = {"probability": prob_share, "min_mbps": 0.1, "max_mbps": 1.0}
-if use_medium: cfg.population.traffic.profiles.medium = {"probability": prob_share, "min_mbps": 1.5, "max_mbps": 5.0}
-if use_heavy: cfg.population.traffic.profiles.heavy = {"probability": prob_share, "min_mbps": 10.0, "max_mbps": 25.0}
+cfg = OmegaConf.merge(cfg, dynamic_overrides)
+
+# Keep YAML traffic profile min/max values, but normalize probabilities based on checkbox selection.
+selected_profiles = {
+    "light": use_light,
+    "medium": use_medium,
+    "heavy": use_heavy,
+}
+
+yaml_profiles = OmegaConf.to_container(population_yaml_cfg.traffic.profiles, resolve=True)
+active_profiles = {
+    profile_name: dict(yaml_profiles[profile_name])
+    for profile_name, is_enabled in selected_profiles.items()
+    if is_enabled and profile_name in yaml_profiles
+}
+
+profile_probability_sum = sum(float(profile["probability"]) for profile in active_profiles.values())
+if profile_probability_sum <= 0:
+    st.error("Configuration error: active traffic profile probabilities must sum to a positive value.")
+    st.stop()
+
+for profile in active_profiles.values():
+    profile["probability"] = float(profile["probability"]) / profile_probability_sum
+
+cfg.population.traffic.profiles = OmegaConf.create(active_profiles)
+
+# Force RF and simulation values to numeric types.
+cfg.constellation.altitude_km = float(cfg.constellation.altitude_km)
+cfg.constellation.eirp_dbw = float(cfg.constellation.eirp_dbw)
+cfg.constellation.g_t_db = float(cfg.constellation.g_t_db)
+cfg.constellation.min_elevation_deg = float(cfg.constellation.min_elevation_deg)
+cfg.constellation.max_steering_angle_deg = float(cfg.constellation.max_steering_angle_deg)
+cfg.constellation.beam_radius_nadir_km = float(cfg.constellation.beam_radius_nadir_km)
+cfg.constellation.freq_ghz = float(cfg.constellation.freq_ghz)
+cfg.constellation.bandwidth_hz = float(cfg.constellation.bandwidth_hz)
+cfg.constellation.sinr_min_db = float(cfg.constellation.sinr_min_db)
+cfg.constellation.theta_3db_deg = float(cfg.constellation.theta_3db_deg)
+cfg.constellation.sll_db = float(cfg.constellation.sll_db)
+cfg.constellation.weather_loss_db = float(cfg.constellation.weather_loss_db)
+
+cfg.terrestrial.coverage_radius_km = float(cfg.terrestrial.coverage_radius_km)
+cfg.terrestrial.bs_capacity_mbps = float(cfg.terrestrial.bs_capacity_mbps)
+cfg.terrestrial.p_tx_dbm = float(cfg.terrestrial.p_tx_dbm)
+cfg.terrestrial.g_tx_dbi = float(cfg.terrestrial.g_tx_dbi)
+cfg.terrestrial.g_rx_ue_dbi = float(cfg.terrestrial.g_rx_ue_dbi)
+cfg.terrestrial.carrier_freq_hz = float(cfg.terrestrial.carrier_freq_hz)
+cfg.terrestrial.bandwidth_hz = float(cfg.terrestrial.bandwidth_hz)
+cfg.terrestrial.sinr_min_db = float(cfg.terrestrial.sinr_min_db)
+cfg.terrestrial.shadowing_std_dev_db = float(cfg.terrestrial.shadowing_std_dev_db)
+cfg.terrestrial.body_loss_db = float(cfg.terrestrial.body_loss_db)
+
+cfg.simulation.duration_s = int(cfg.simulation.duration_s)
+cfg.simulation.time_step_s = int(cfg.simulation.time_step_s)
+cfg.simulation.beam_capacity_mbps = float(cfg.simulation.beam_capacity_mbps)
+
+# Validation before the expensive simulation starts.
+city_weight_total = sum(float(city_cfg.weight) for city_cfg in cfg.population.cities.values())
+if not np.isclose(city_weight_total, 1.0):
+    st.error(
+        f"Configuration error: population city weights sum to {city_weight_total:.4f}, "
+        "but they must sum to 1.0."
+    )
+    st.stop()
+
+profile_probability_total = sum(
+    float(profile_cfg.probability)
+    for profile_cfg in cfg.population.traffic.profiles.values()
+)
+if not np.isclose(profile_probability_total, 1.0):
+    st.error(
+        f"Configuration error: traffic profile probabilities sum to {profile_probability_total:.4f}, "
+        "but they must sum to 1.0."
+    )
+    st.stop()
+
+if cfg.simulation.beam_capacity_mbps <= 0:
+    st.error("Configuration error: simulation.beam_capacity_mbps must be greater than zero.")
+    st.stop()
+
+if cfg.constellation.bandwidth_hz <= 0:
+    st.error("Configuration error: constellation.bandwidth_hz must be greater than zero.")
+    st.stop()
+
+if cfg.terrestrial.bandwidth_hz <= 0:
+    st.error("Configuration error: terrestrial.bandwidth_hz must be greater than zero.")
+    st.stop()
+
+with st.sidebar.expander("Resolved Configuration Preview"):
+    st.json(OmegaConf.to_container(cfg, resolve=True), expanded=False)
 
 # ==========================================
 # SIMULATION EXECUTION
