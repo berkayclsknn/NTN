@@ -40,6 +40,18 @@ class User:
         self.current_h3_id = h3.latlng_to_cell(self.current_lat, self.current_lon, resolution)
 
     def get_demand_at_time(self, hour: float) -> float:
+        """
+    Computes time-varying network demand using a baseline plus
+    double-Gaussian diurnal traffic profile.
+
+    Functional form motivated by:
+    Almeida, Queijo, and Correia, "Spatial and temporal traffic
+    distribution models for GSM," IEEE VTC Fall, 1999.
+    doi: 10.1109/VETECF.1999.797068
+
+    Parameter values are configurable simulation assumptions and
+    are not claimed to be directly calibrated from the cited dataset.
+    """
         base_traffic = self.diurnal_cfg.get('base_traffic_multiplier', 0.2)
         n_cfg = self.diurnal_cfg.get('noon_peak', {})
         noon_peak = n_cfg.get('height_multiplier', 0.5) * np.exp(-((hour - n_cfg.get('center_hour', 12.0))**2) / (2 * (n_cfg.get('width_hours', 3.0)**2)))

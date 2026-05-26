@@ -77,9 +77,9 @@ DEFAULT_CITY_RATIO = (
 )
 DEFAULT_CITY_RATIO = round(_clamp(DEFAULT_CITY_RATIO, 0.1, 0.9), 1)
 
-DEFAULT_TN_POP_THRESHOLD = _clamp(_to_int(terrestrial_yaml_cfg.density_threshold, 5), 2, 50)
-DEFAULT_USERS_PER_CLUSTER = _clamp(_to_int(terrestrial_yaml_cfg.users_per_cluster_ratio, 10), 5, 100)
-DEFAULT_TN_BS_CAPACITY_GBPS = _clamp(_to_int(_to_float(terrestrial_yaml_cfg.bs_capacity_mbps, 10000.0) / 1000.0, 10), 1, 50)
+DEFAULT_TN_POP_THRESHOLD = _clamp(_to_int(terrestrial_yaml_cfg.density_threshold, 50), 2, 100)
+DEFAULT_USERS_PER_CLUSTER = _clamp(_to_int(terrestrial_yaml_cfg.users_per_cluster_ratio, 20), 5, 100)
+DEFAULT_TN_BS_CAPACITY_GBPS = _clamp(_to_int(_to_float(terrestrial_yaml_cfg.bs_capacity_mbps, 10000.0) / 1000.0, 50), 1, 100)
 DEFAULT_TN_BW_MHZ = _clamp(_to_int(_to_float(terrestrial_yaml_cfg.bandwidth_hz, 100e6) / 1e6, 100), 10, 400)
 
 DEFAULT_TN_COVERAGE_RADIUS = float(_clamp(_to_float(terrestrial_yaml_cfg.coverage_radius_km, 10.0), 1.0, 50.0))
@@ -141,38 +141,32 @@ CITY_RATIO = st.sidebar.slider(
     step=0.1,
 )
 
-st.sidebar.subheader("2. Infrastructure Settings")
-TN_POP_THRESHOLD = st.sidebar.slider(
-    "Urban Discovery Threshold",
-    min_value=2,
-    max_value=50,
-    value=DEFAULT_TN_POP_THRESHOLD,
-    step=1,
-    help="DBSCAN: Minimum users needed to identify an area as an 'Urban Zone' for 5G.",
+st.sidebar.subheader("2. Infrastructure Settings (Two-Pass K-Means)")
+
+# PASS 1: The "Discovery" Threshold
+TN_CITY_THRESHOLD = st.sidebar.slider(
+    "Urban Discovery Threshold", 
+    min_value=10, 
+    max_value=100, 
+    value=50, 
+    help="Pass 1: Minimum number of users in a region to classify it as a 'City' for 5G deployment."
 )
-USERS_PER_CLUSTER = st.sidebar.slider(
-    "Target Users per Tower",
-    min_value=5,
-    max_value=100,
-    value=DEFAULT_USERS_PER_CLUSTER,
-    step=5,
-    help="K-Means: How many users should share one tower? Lower = more towers (better capacity).",
+
+# PASS 2: The "Densification" Ratio
+TN_USERS_PER_TOWER = st.sidebar.slider(
+    "Target Users per Tower", 
+    min_value=5, 
+    max_value=50, 
+    value=20, 
+    help="Pass 2: The average number of users each 5G tower should serve in a city."
 )
-TN_BS_CAPACITY_GBPS = st.sidebar.slider(
-    "TN Tower Capacity (Gbps)",
-    min_value=1,
-    max_value=50,
-    value=DEFAULT_TN_BS_CAPACITY_GBPS,
-    step=1,
-)
+
+TN_BS_CAPACITY_GBPS = st.sidebar.slider("TN Tower Capacity (Gbps)", min_value=1, max_value=50, value=10, step=1)
 TN_BS_CAPACITY_MBPS = TN_BS_CAPACITY_GBPS * 1000
-TN_BW_MHZ = st.sidebar.slider(
-    "BS Bandwidth (MHz)",
-    min_value=10,
-    max_value=400,
-    value=DEFAULT_TN_BW_MHZ,
-    step=10,
-)
+TN_BW_MHZ = st.sidebar.slider("BS Bandwidth (MHz)", min_value=10, max_value=400, value=100, step=10)
+
+# Inform user about Dynamic Radius
+st.sidebar.info("✨ **Dynamic Coverage Enabled**: Radius is automatically calculated per-tower to ensure 100% geographic coverage for all urban users.")
 
 # --- Advanced 5G RF Parameters Dropdown ---
 with st.sidebar.expander("Advanced 5G RF Parameters"):
@@ -453,19 +447,24 @@ dynamic_overrides = OmegaConf.create({
     },
 
     "terrestrial": {
-        "density_threshold": int(TN_POP_THRESHOLD),
-        "users_per_cluster_ratio": int(USERS_PER_CLUSTER),
-        "coverage_radius_km": float(TN_COVERAGE_RADIUS),
-        "bs_capacity_mbps": float(TN_BS_CAPACITY_MBPS),
-        "p_tx_dbm": float(TN_P_TX),
-        "g_tx_dbi": float(TN_G_TX),
-        "g_rx_ue_dbi": float(TN_G_RX),
-        "carrier_freq_hz": float(TN_FREQ_GHZ * 1e9),
-        "bandwidth_hz": float(TN_BW_MHZ * 1e6),
-        "sinr_min_db": float(TN_SINR_MIN),
-        "shadowing_std_dev_db": float(TN_SHADOWING),
-        "body_loss_db": float(TN_BODY_LOSS),
-    },
+    "density_threshold": TN_CITY_THRESHOLD,         # Pass 1 Threshold (50)
+    "users_per_cluster_ratio": TN_USERS_PER_TOWER,  # Pass 2 Ratio (20)
+    "bs_capacity_mbps": float(TN_BS_CAPACITY_MBPS),
+    "bandwidth_hz": TN_BW_MHZ * 1e6,
+    
+    # RF Physical Parameters (Still needed for the Link Budget/SINR math)
+    "p_tx_dbm": TN_P_TX,
+    "g_tx_dbi": TN_G_TX,
+    "g_rx_ue_dbi": TN_G_RX,
+    "carrier_freq_hz": TN_FREQ_GHZ * 1e9,
+    "sinr_min_db": TN_SINR_MIN,
+    "shadowing_std_dev_db": TN_SHADOWING,         
+    "body_loss_db": TN_BODY_LOSS,
+    
+    # Force dynamic radius logic in backend
+    "use_physical_radius": True,
+    "fixed_coverage_radius_km": False # Ensure this is False so it uses the K-Means dynamic radius
+},
 
     "simulation": {
         "duration_s": int(SIM_DURATION),
@@ -585,7 +584,7 @@ with st.spinner("Deploying LEO Satellite Constellation & SGP4 Propagators..."):
 with st.spinner("Spawning Heterogeneous User Population..."):
     users = generate_users(cfg, active_region)
 
-with st.spinner("Executing Urban Discovery (DBSCAN) & Densification (K-Means)..."):
+with st.spinner("Executing Two-Pass Recursive K-Means (Discovery + Densification)..."):
     towers = generate_terrestrial_network(cfg, users, active_region.h3_resolution)
 
 with st.spinner("Running Master RF Simulation Loop (Link Budgets & Admission Control)..."):
